@@ -1,0 +1,9 @@
+node_modules
+sessions
+logs
+qr
+.env
+*.md
+.git
+.gitignore
+deploy.sh

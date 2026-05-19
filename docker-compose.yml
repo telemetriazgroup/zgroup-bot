@@ -1,0 +1,63 @@
+version: "3.9"
+
+services:
+
+  bot:
+    build: .
+    container_name: zgroup-bot
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "9301:9301"
+    volumes:
+      - sessions:/app/sessions        # sesión de WhatsApp persistente
+      - ./logs:/app/logs              # logs del bot
+      - ./qr:/app/qr                  # QR compartido con nginx (qr-viewer)
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - zgroup-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  db:
+    image: postgres:16-alpine
+    container_name: zgroup-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./src/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    networks:
+      - zgroup-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  qr-viewer:
+    image: nginx:alpine
+    container_name: zgroup-qr
+    restart: unless-stopped
+    ports:
+      - "9300:80"
+    volumes:
+      - ./qr:/usr/share/nginx/html:ro   # sirve el QR como imagen web
+    networks:
+      - zgroup-net
+
+volumes:
+  sessions:
+  pgdata:
+
+networks:
+  zgroup-net:
+    driver: bridge
