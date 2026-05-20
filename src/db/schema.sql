@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS usuario_equipos (
 CREATE TABLE IF NOT EXISTS alertas (
   id         SERIAL PRIMARY KEY,
   equipo_id  VARCHAR(50)  NOT NULL,
-  tipo       VARCHAR(100) NOT NULL,
+  tipo       TEXT         NOT NULL,
   temperatura NUMERIC(5,2),
   humedad    NUMERIC(5,2),
   ubicacion  VARCHAR(200),

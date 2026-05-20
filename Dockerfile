@@ -23,6 +23,7 @@ RUN npm ci --omit=dev
 # Copiar código fuente
 COPY src/ ./src/
 COPY index.js ./
+COPY public/ ./public/
 
 # Carpeta de sesión persistente (se montará como volumen)
 RUN mkdir -p /app/sessions && chmod 777 /app/sessions

@@ -1,13 +1,17 @@
 require('dotenv').config()
-const express    = require('express')
+const path = require('path')
+const express = require('express')
 const { conectarWhatsApp } = require('./src/bot')
-const alertasRouter        = require('./src/alertas')
-const { logger }           = require('./src/logger')
+const alertasRouter = require('./src/alertas')
+const { db } = require('./src/db')
+const { iniciarMonitor } = require('./src/services/alertas')
+const { logger } = require('./src/logger')
 
 const app  = express()
 const PORT = process.env.PORT || 9301
 
 app.use(express.json())
+app.use('/admin', express.static(path.join(__dirname, 'public', 'admin')))
 
 // Middleware: validar token interno en todas las rutas /api
 app.use('/api', (req, res, next) => {
@@ -19,16 +23,18 @@ app.use('/api', (req, res, next) => {
 })
 
 app.use('/api', alertasRouter)
-
-// Health check para Docker
 app.get('/health', (req, res) => res.json({ status: 'ok' }))
 
 async function iniciar() {
   try {
+    await db.initDb()
+    logger.info('✅ Base de datos inicializada')
     await conectarWhatsApp()
     app.listen(PORT, () => {
       logger.info(`🚀 API ZGroup escuchando en puerto ${PORT}`)
+      logger.info(`🖥️  Panel admin: http://localhost:${PORT}/admin`)
     })
+    iniciarMonitor()
   } catch (err) {
     logger.error('Error al iniciar:', err)
     process.exit(1)

@@ -1,90 +1,329 @@
-const express    = require('express')
-const { getSock } = require('./bot')
-const { db }      = require('./db')
-const { logger }  = require('./logger')
+const express = require('express')
+const { db } = require('./db')
+const { logger } = require('./logger')
+const { enviarAlertaWhatsApp, syncYAlertar, enviarTestAlarma } = require('./services/alertas')
+const { monitorearDispositivosActivos, obtenerLiveDispositivo, evaluarDispositivo } = require('./services/monitoreo')
+const { enviarTestEstadoUsuario, enviarTestEstadoMultiples } = require('./services/estado')
+const { sincronizarDispositivos } = require('./services/dispositivos')
 
 const router = express.Router()
 
-// POST /api/alerta
-// Llamado por el sistema reefer cuando detecta una anomalía
+// POST /api/alerta — alerta manual o desde sistema externo
 router.post('/alerta', async (req, res) => {
   const { equipo_id, tipo_alerta, temperatura, humedad, ubicacion, nivel } = req.body
-
   if (!equipo_id || !tipo_alerta) {
     return res.status(400).json({ error: 'equipo_id y tipo_alerta son requeridos' })
   }
-
-  const sock = getSock()
-  if (!sock) {
-    return res.status(503).json({ error: 'Bot de WhatsApp no está conectado aún' })
-  }
-
   try {
-    // Guardar alerta en BD
     await db.registrarAlerta({ equipo_id, tipo_alerta, temperatura, humedad, ubicacion, nivel })
-
-    // Buscar usuarios que deben recibir esta alerta
-    const usuarios = await db.obtenerUsuariosDeEquipo(equipo_id)
-
-    if (!usuarios.length) {
-      logger.warn(`⚠️ Alerta recibida para ${equipo_id} pero no hay usuarios asignados`)
-      return res.json({ ok: true, enviados: 0, advertencia: 'Sin usuarios asignados' })
-    }
-
-    const emoji  = nivel === 'critico' ? '🚨' : '⚠️'
-    const titulo = nivel === 'critico' ? 'ALERTA CRÍTICA' : 'ALERTA'
-
-    const mensaje =
-      `${emoji} *${titulo} REEFER — ZGroup*\n\n` +
-      `📦 Equipo: *${equipo_id}*\n` +
-      `⚠️ Tipo: ${tipo_alerta}\n` +
-      `🌡️ Temperatura: *${temperatura}°C*\n` +
-      (humedad ? `💧 Humedad: ${humedad}%\n` : '') +
-      `📍 Ubicación: ${ubicacion}\n` +
-      `🕐 Hora: ${new Date().toLocaleString('es-PE', { timeZone: 'America/Lima' })}\n\n` +
-      `Responde *ESTADO* para ver todos tus equipos.`
-
-    let enviados = 0
-    for (const usuario of usuarios) {
-      try {
-        await sock.sendMessage(`${usuario.telefono}@s.whatsapp.net`, { text: mensaje })
-        enviados++
-        logger.info(`📤 Alerta enviada a ${usuario.nombre} (${usuario.telefono})`)
-      } catch (err) {
-        logger.error(`❌ Error enviando a ${usuario.telefono}:`, err.message)
-      }
-    }
-
-    res.json({ ok: true, enviados, total_usuarios: usuarios.length })
-
+    const resultado = await enviarAlertaWhatsApp({ equipo_id, tipo_alerta, ubicacion, nivel })
+    if (resultado.error) return res.status(503).json({ error: resultado.error })
+    res.json({ ok: true, ...resultado })
   } catch (err) {
     logger.error('Error procesando alerta:', err)
     res.status(500).json({ error: 'Error interno del servidor' })
   }
 })
 
-// GET /api/usuarios — listar usuarios registrados
+// ── Usuarios ────────────────────────────────────────────────
+
 router.get('/usuarios', async (req, res) => {
+  try { res.json(await db.listarUsuarios()) }
+  catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.post('/usuarios', async (req, res) => {
+  const { nombre, telefono, equipo_ids } = req.body
+  if (!nombre || !telefono) return res.status(400).json({ error: 'nombre y telefono requeridos' })
   try {
-    const usuarios = await db.listarUsuarios()
-    res.json(usuarios)
+    const usuario = await db.crearUsuario({ nombre, telefono, equipo_ids: equipo_ids || [] })
+    res.status(201).json(usuario)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.put('/usuarios/:id', async (req, res) => {
+  try {
+    const usuario = await db.actualizarUsuario(parseInt(req.params.id), req.body)
+    res.json(usuario)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.delete('/usuarios/:id', async (req, res) => {
+  try {
+    await db.eliminarUsuario(parseInt(req.params.id))
+    res.json({ ok: true })
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+// ── Equipos ─────────────────────────────────────────────────
+
+router.get('/equipos', async (req, res) => {
+  try { res.json(await db.listarEquipos()) }
+  catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.post('/equipos', async (req, res) => {
+  const { id_equipo, nombre } = req.body
+  if (!id_equipo || !nombre) return res.status(400).json({ error: 'id_equipo y nombre requeridos' })
+  try {
+    const equipo = await db.crearEquipo(req.body)
+    res.status(201).json(equipo)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.put('/equipos/:id', async (req, res) => {
+  try {
+    const equipo = await db.actualizarEquipo(parseInt(req.params.id), req.body)
+    res.json(equipo)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.delete('/equipos/:id', async (req, res) => {
+  try {
+    await db.eliminarEquipo(parseInt(req.params.id))
+    res.json({ ok: true })
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+// ── Alertas ─────────────────────────────────────────────────
+
+router.get('/alertas', async (req, res) => {
+  try {
+    const solo_activas = req.query.activas === 'true'
+    res.json(await db.listarAlertas({ solo_activas }))
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.patch('/alertas/:id/resolver', async (req, res) => {
+  try {
+    const alerta = await db.resolverAlerta(parseInt(req.params.id))
+    res.json(alerta)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.get('/config-alertas', async (req, res) => {
+  try { res.json(await db.listarConfigAlertas()) }
+  catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.put('/config-alertas/:tipo', async (req, res) => {
+  try {
+    const cfg = await db.actualizarConfigAlerta(req.params.tipo, req.body)
+    res.json(cfg)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+// ── Config API ──────────────────────────────────────────────
+
+router.get('/config', async (req, res) => {
+  try { res.json(await db.obtenerConfigApi()) }
+  catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.put('/config', async (req, res) => {
+  try {
+    const config = await db.actualizarConfigApi(req.body)
+    res.json(config)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+// ── Dispositivos ────────────────────────────────────────────
+
+router.get('/dispositivos', async (req, res) => {
+  try {
+    res.json(await db.listarDispositivos({ estado: req.query.estado }))
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.get('/dispositivos/stats', async (req, res) => {
+  try { res.json(await db.contarDispositivos()) }
+  catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.post('/dispositivos/sync', async (req, res) => {
+  try {
+    const conAlertas = req.query.alertas === 'true'
+    const result = conAlertas ? await syncYAlertar() : await sincronizarDispositivos()
+    res.json({ ok: true, ...result })
   } catch (err) {
+    logger.error('Error sincronizando:', err)
     res.status(500).json({ error: err.message })
   }
 })
 
-// POST /api/usuarios — registrar usuario interno
-router.post('/usuarios', async (req, res) => {
-  const { nombre, telefono, equipo_ids } = req.body
-  if (!nombre || !telefono) {
-    return res.status(400).json({ error: 'nombre y telefono son requeridos' })
-  }
+router.patch('/dispositivos/:id/alarma', async (req, res) => {
   try {
-    const usuario = await db.crearUsuario({ nombre, telefono, equipo_ids })
-    res.status(201).json(usuario)
+    const disp = await db.toggleAlarmaDispositivo(parseInt(req.params.id), !!req.body.activa)
+    res.json(disp)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.patch('/dispositivos/:id/nombre', async (req, res) => {
+  try {
+    const disp = await db.actualizarNombreDispositivo(parseInt(req.params.id), req.body.nombre)
+    res.json(disp)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.get('/dispositivos/:id/usuarios', async (req, res) => {
+  try {
+    const disp = await db.obtenerDispositivoPorId(parseInt(req.params.id))
+    if (!disp) return res.status(404).json({ error: 'Dispositivo no encontrado' })
+    const usuarios = await db.obtenerUsuariosDeEquipo(disp.imei)
+    res.json({ dispositivo: disp, usuarios })
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.post('/dispositivos/:id/test-alarma', async (req, res) => {
+  try {
+    const resultado = await enviarTestAlarma(parseInt(req.params.id))
+    if (resultado.error) return res.status(503).json(resultado)
+    res.json({ ok: true, ...resultado })
   } catch (err) {
+    logger.error('Error en test alarma:', err)
     res.status(500).json({ error: err.message })
   }
+})
+
+router.get('/dispositivos/:id/live', async (req, res) => {
+  try {
+    const data = await obtenerLiveDispositivo(parseInt(req.params.id))
+    res.json(data)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.put('/dispositivos/:id/monitoreo', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id)
+    const disp = await db.actualizarMonitoreoConfig(id, req.body)
+    const evaluacion = req.body.evaluar !== false
+      ? await evaluarDispositivo(id, { notificar: true })
+      : null
+    res.json({ dispositivo: disp, evaluacion })
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.post('/dispositivos/:id/evaluar', async (req, res) => {
+  try {
+    const resultado = await evaluarDispositivo(parseInt(req.params.id), { notificar: true })
+    res.json({ ok: true, ...resultado })
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+// ── Grupos de alertas ───────────────────────────────────────
+
+router.get('/grupos', async (req, res) => {
+  try { res.json(await db.listarGrupos()) }
+  catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.get('/grupos/:id', async (req, res) => {
+  try {
+    const grupo = await db.obtenerGrupo(parseInt(req.params.id))
+    if (!grupo) return res.status(404).json({ error: 'Grupo no encontrado' })
+    res.json(grupo)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.post('/grupos', async (req, res) => {
+  const { nombre, descripcion, dispositivo_ids } = req.body
+  if (!nombre) return res.status(400).json({ error: 'nombre requerido' })
+  try {
+    const grupo = await db.crearGrupo({ nombre, descripcion, dispositivo_ids: dispositivo_ids || [] })
+    res.status(201).json(grupo)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.put('/grupos/:id', async (req, res) => {
+  try {
+    const grupo = await db.actualizarGrupo(parseInt(req.params.id), req.body)
+    res.json(grupo)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.delete('/grupos/:id', async (req, res) => {
+  try {
+    await db.eliminarGrupo(parseInt(req.params.id))
+    res.json({ ok: true })
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.put('/grupos/:id/usuarios', async (req, res) => {
+  const { usuario_ids, accion } = req.body
+  if (!usuario_ids?.length) return res.status(400).json({ error: 'usuario_ids requerido' })
+  try {
+    await db.asignarUsuariosAGrupo(parseInt(req.params.id), usuario_ids, accion || 'agregar')
+    res.json({ ok: true })
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+// ── Asignaciones masivas ────────────────────────────────────
+
+router.post('/asignaciones/bulk', async (req, res) => {
+  const { usuario_ids, grupo_ids, dispositivo_ids, equipo_ids, accion } = req.body
+  if (!usuario_ids?.length) return res.status(400).json({ error: 'Selecciona al menos un usuario' })
+  try {
+    const result = await db.asignacionMasiva({
+      usuario_ids, grupo_ids, dispositivo_ids, equipo_ids, accion: accion || 'agregar'
+    })
+    res.json(result)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.get('/usuarios/:id/asignaciones', async (req, res) => {
+  try {
+    const usuario = await db.obtenerUsuarioPorId(parseInt(req.params.id))
+    if (!usuario) return res.status(404).json({ error: 'Usuario no encontrado' })
+    const list = await db.listarUsuarios()
+    const u = list.find(x => x.id === usuario.id) || usuario
+    const organizado = await db.obtenerDispositivosOrganizadosUsuario(usuario.id)
+    res.json({ usuario: u, ...organizado })
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.post('/usuarios/:id/test-estado', async (req, res) => {
+  try {
+    const { dispositivo_ids } = req.body || {}
+    const result = await enviarTestEstadoUsuario(parseInt(req.params.id), dispositivo_ids)
+    if (result.error) return res.status(503).json(result)
+    res.json({ ok: true, ...result })
+  } catch (err) {
+    logger.error('Error test estado:', err)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.post('/asignaciones/test-estado/preview', async (req, res) => {
+  const { usuario_ids } = req.body
+  if (!usuario_ids?.length) return res.status(400).json({ error: 'Selecciona al menos un usuario' })
+  try {
+    const preview = await db.obtenerPreviewTestEstado(usuario_ids)
+    res.json(preview)
+  } catch (err) {
+    logger.error('Error preview test estado:', err)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.post('/asignaciones/test-estado', async (req, res) => {
+  const { usuario_ids, dispositivo_ids } = req.body
+  if (!usuario_ids?.length) return res.status(400).json({ error: 'Selecciona al menos un usuario' })
+  if (!dispositivo_ids?.length) return res.status(400).json({ error: 'Selecciona al menos un dispositivo' })
+  try {
+    const resultados = await enviarTestEstadoMultiples(usuario_ids, dispositivo_ids)
+    res.json({ ok: true, resultados })
+  } catch (err) {
+    logger.error('Error test estado múltiple:', err)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// ── Estado bot ──────────────────────────────────────────────
+
+router.get('/bot/status', async (req, res) => {
+  const { getSock } = require('./bot')
+  const sock = getSock()
+  res.json({ conectado: !!sock?.user, usuario: sock?.user?.id || null })
 })
 
 module.exports = router

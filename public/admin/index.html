@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ZGroup Bot — Panel Admin</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- Login -->
+<div id="login-screen" class="login-screen">
+  <div class="login-card">
+    <h1>🤖 ZGroup Bot</h1>
+    <p>Panel de administración</p>
+    <div class="form-group">
+      <label>API Secret</label>
+      <input type="password" id="login-secret" placeholder="Token de acceso (API_SECRET)">
+    </div>
+    <button class="btn btn-primary" style="width:100%" onclick="login()">Ingresar</button>
+    <p id="login-error" style="color:var(--red);margin-top:12px;font-size:0.85rem" class="hidden"></p>
+  </div>
+</div>
+
+<!-- App -->
+<div id="app" class="app hidden">
+  <nav class="sidebar">
+    <div class="logo">ZGroup Admin</div>
+    <div class="nav-item active" data-section="dashboard">📊 Dashboard</div>
+    <div class="nav-item" data-section="dispositivos">📡 Dispositivos</div>
+    <div class="nav-item" data-section="grupos">📁 Grupos</div>
+    <div class="nav-item" data-section="asignaciones">🔗 Asignaciones</div>
+    <div class="nav-item" data-section="usuarios">👥 Usuarios</div>
+    <div class="nav-item" data-section="equipos">📦 Equipos</div>
+    <div class="nav-item" data-section="alertas">⚠️ Alertas</div>
+    <div class="nav-item" data-section="config">⚙️ Configuración</div>
+    <div class="nav-item" style="margin-top:auto" onclick="logout()">🚪 Salir</div>
+  </nav>
+
+  <main class="main">
+
+    <!-- Dashboard -->
+    <section id="sec-dashboard" class="section active">
+      <div class="page-header">
+        <h2>Dashboard</h2>
+        <button class="btn btn-primary" onclick="syncDispositivos(true)">🔄 Sincronizar ahora</button>
+      </div>
+      <div class="stats-grid" id="stats-grid"></div>
+      <div class="card-panel">
+        <h3>Estado del bot WhatsApp</h3>
+        <p id="bot-status-text">Verificando…</p>
+      </div>
+    </section>
+
+    <!-- Dispositivos -->
+    <section id="sec-dispositivos" class="section">
+      <div class="page-header">
+        <h2>Dispositivos</h2>
+        <button class="btn btn-primary" onclick="syncDispositivos(false)">🔄 Sincronizar API</button>
+      </div>
+      <div class="filters" id="disp-filters">
+        <button class="filter-btn active" data-estado="">Todos</button>
+        <button class="filter-btn" data-estado="online">Online</button>
+        <button class="filter-btn" data-estado="wait">Wait</button>
+        <button class="filter-btn" data-estado="offline">Offline</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Link</th>
+              <th>Alarma</th>
+              <th>IMEI</th>
+              <th>Nombre</th>
+              <th>Estado</th>
+              <th>Usuarios</th>
+              <th>Último dato</th>
+              <th>IP</th>
+              <th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody id="tbody-dispositivos"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Grupos -->
+    <section id="sec-grupos" class="section">
+      <div class="page-header">
+        <h2>Grupos de alertas</h2>
+        <button class="btn btn-primary" onclick="abrirModalGrupo()">+ Nuevo grupo</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Nombre</th><th>Descripción</th><th>Dispositivos</th><th>Usuarios</th><th>Activo</th><th>Acciones</th></tr>
+          </thead>
+          <tbody id="tbody-grupos"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Asignaciones masivas -->
+    <section id="sec-asignaciones" class="section">
+      <div class="page-header">
+        <h2>Asignaciones</h2>
+        <button class="btn btn-secondary" id="btn-test-estado" onclick="abrirModalTestEstado()" disabled>📊 Test envío de estado</button>
+      </div>
+      <div class="assign-grid-3">
+        <div class="card-panel">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+            <h3 style="margin:0">Usuarios</h3>
+            <label class="form-check" style="font-size:0.85rem"><input type="checkbox" id="asig-sel-todos" onchange="toggleTodosUsuarios(this.checked)"> Todos</label>
+          </div>
+          <input type="search" id="asig-user-buscar" class="search-input" placeholder="Buscar usuario..." oninput="renderAsigUsuarios()">
+          <div id="asig-usuarios-list" class="multi-list"></div>
+        </div>
+        <div class="card-panel">
+          <h3>Asignaciones actuales</h3>
+          <p class="hint" id="asig-actuales-hint">Selecciona uno o más usuarios para ver sus grupos y dispositivos.</p>
+          <div id="asig-actuales-content" class="hidden"></div>
+        </div>
+        <div class="card-panel">
+          <h3>Asignar a seleccionados</h3>
+          <div class="form-group">
+            <label>Grupos de alertas</label>
+            <input type="search" id="asig-grupos-buscar" class="search-input" placeholder="Buscar grupo..." oninput="renderAsigGrupos()">
+            <div id="asig-grupos-list" class="multi-list asig-picker"></div>
+          </div>
+          <div class="form-group">
+            <label>Dispositivos (individual)</label>
+            <input type="search" id="asig-disp-buscar" class="search-input" placeholder="Buscar IMEI o nombre..." oninput="renderAsigDispositivos()">
+            <div id="asig-dispositivos-list" class="multi-list asig-picker"></div>
+          </div>
+          <div class="form-group">
+            <label>Equipos (individual)</label>
+            <input type="search" id="asig-equipos-buscar" class="search-input" placeholder="Buscar equipo..." oninput="renderAsigEquipos()">
+            <div id="asig-equipos-list" class="multi-list asig-picker"></div>
+          </div>
+          <div class="form-group">
+            <label>Acción</label>
+            <select id="asig-accion">
+              <option value="agregar">Agregar a selección existente</option>
+              <option value="quitar">Quitar de usuarios seleccionados</option>
+              <option value="reemplazar">Reemplazar todas las asignaciones</option>
+            </select>
+          </div>
+          <button class="btn btn-primary" style="width:100%" onclick="aplicarAsignacionMasiva()">Aplicar asignación</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Usuarios -->
+    <section id="sec-usuarios" class="section">
+      <div class="page-header">
+        <h2>Usuarios</h2>
+        <button class="btn btn-primary" onclick="abrirModalUsuario()">+ Nuevo usuario</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Nombre</th><th>Teléfono</th><th>Grupos</th><th>Dispositivos</th><th>Equipos</th><th>Activo</th><th>Acciones</th></tr>
+          </thead>
+          <tbody id="tbody-usuarios"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Equipos -->
+    <section id="sec-equipos" class="section">
+      <div class="page-header">
+        <h2>Equipos</h2>
+        <button class="btn btn-primary" onclick="abrirModalEquipo()">+ Nuevo equipo</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>ID</th><th>Nombre</th><th>IMEI</th><th>Temp</th><th>Ubicación</th><th>Alarma</th><th>Acciones</th></tr>
+          </thead>
+          <tbody id="tbody-equipos"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Alertas -->
+    <section id="sec-alertas" class="section">
+      <div class="page-header">
+        <h2>Alertas</h2>
+        <div>
+          <button class="btn btn-secondary" onclick="cargarAlertas(false)">Todas</button>
+          <button class="btn btn-secondary" onclick="cargarAlertas(true)">Solo activas</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Equipo</th><th>Tipo</th><th>Nivel</th><th>Fecha</th><th>Estado</th><th>Acciones</th></tr>
+          </thead>
+          <tbody id="tbody-alertas"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Config -->
+    <section id="sec-config" class="section">
+      <div class="page-header"><h2>Configuración</h2></div>
+      <div class="config-grid">
+        <div class="card-panel">
+          <h3>API de dispositivos</h3>
+          <form id="form-config-api" onsubmit="guardarConfig(event)">
+            <div class="form-group">
+              <label>URL API dispositivos (reporte)</label>
+              <input name="url" id="cfg-url">
+            </div>
+            <div class="form-group">
+              <label>URL API telemetría live</label>
+              <input name="url_live" id="cfg-url-live">
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>Online hasta (horas)</label>
+                <input type="number" step="0.5" name="online_hasta_horas" id="cfg-online">
+              </div>
+              <div class="form-group">
+                <label>Wait hasta (horas)</label>
+                <input type="number" step="0.5" name="wait_hasta_horas" id="cfg-wait">
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Intervalo monitor (minutos)</label>
+              <input type="number" name="intervalo_minutos" id="cfg-intervalo">
+            </div>
+            <div class="form-row">
+              <div class="form-check"><input type="checkbox" id="cfg-alerta-online"><label for="cfg-alerta-online">Alertar online</label></div>
+              <div class="form-check"><input type="checkbox" id="cfg-alerta-wait"><label for="cfg-alerta-wait">Alertar wait</label></div>
+              <div class="form-check"><input type="checkbox" id="cfg-alerta-offline"><label for="cfg-alerta-offline">Alertar offline</label></div>
+            </div>
+            <button type="submit" class="btn btn-primary" style="margin-top:12px">Guardar configuración</button>
+          </form>
+        </div>
+        <div class="card-panel">
+          <h3>Tipos de alerta</h3>
+          <div id="config-alertas-list"></div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- Modal Grupo -->
+<div id="modal-grupo" class="modal-overlay hidden" onclick="if(event.target===this)cerrarModal('modal-grupo')">
+  <div class="modal" style="max-width:720px">
+    <h3 id="modal-grupo-titulo">Nuevo grupo</h3>
+    <form onsubmit="guardarGrupo(event)">
+      <input type="hidden" id="grupo-id">
+      <div class="form-row">
+        <div class="form-group"><label>Nombre</label><input id="grupo-nombre" required></div>
+        <div class="form-group form-check" style="align-self:end;padding-bottom:10px">
+          <input type="checkbox" id="grupo-activo" checked><label for="grupo-activo">Activo</label>
+        </div>
+      </div>
+      <div class="form-group"><label>Descripción</label><input id="grupo-descripcion"></div>
+
+      <div class="card-panel" style="padding:16px;margin-bottom:16px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+          <h3 style="margin:0;font-size:0.95rem">Dispositivos del grupo</h3>
+          <span id="grupo-disp-contador" class="badge badge-ok">0 seleccionados</span>
+        </div>
+
+        <div class="form-group" style="margin-bottom:10px">
+          <input type="text" id="grupo-disp-buscar" placeholder="🔍 Buscar por IMEI, nombre o IP..." oninput="filtrarGrupoDispositivos()">
+        </div>
+
+        <div class="filters" id="grupo-disp-filtros" style="margin-bottom:10px">
+          <button type="button" class="filter-btn active" data-estado="">Todos</button>
+          <button type="button" class="filter-btn" data-estado="online">Online</button>
+          <button type="button" class="filter-btn" data-estado="wait">Wait</button>
+          <button type="button" class="filter-btn" data-estado="offline">Offline</button>
+        </div>
+
+        <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+          <button type="button" class="btn btn-sm btn-secondary" onclick="grupoSeleccionarVisibles(true)">✓ Seleccionar visibles</button>
+          <button type="button" class="btn btn-sm btn-secondary" onclick="grupoSeleccionarVisibles(false)">✗ Quitar visibles</button>
+          <button type="button" class="btn btn-sm btn-secondary" onclick="grupoLimpiarSeleccion()">Limpiar todo</button>
+        </div>
+
+        <div id="grupo-disp-seleccionados" class="grupo-chips hidden"></div>
+
+        <div id="grupo-disp-lista" class="disp-picker-list"></div>
+        <p id="grupo-disp-vacio" class="hidden empty" style="padding:20px">No hay dispositivos que coincidan con la búsqueda.</p>
+      </div>
+
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" onclick="cerrarModal('modal-grupo')">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar grupo</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal Usuario -->
+<div id="modal-usuario" class="modal-overlay hidden" onclick="if(event.target===this)cerrarModal('modal-usuario')">
+    <div class="modal" style="max-width:560px">
+    <h3 id="modal-usuario-titulo">Nuevo usuario</h3>
+    <form onsubmit="guardarUsuario(event)">
+      <input type="hidden" id="usuario-id">
+      <div class="form-group"><label>Nombre</label><input id="usuario-nombre" required></div>
+      <div class="form-group"><label>Teléfono (código país, ej: 51999888777)</label><input id="usuario-telefono" required></div>
+      <div class="form-group form-check"><input type="checkbox" id="usuario-activo" checked><label for="usuario-activo">Activo</label></div>
+      <div class="form-group">
+        <label>Grupos de alertas</label>
+        <select id="usuario-grupos" multiple style="height:100px"></select>
+      </div>
+      <div class="form-group">
+        <label>Dispositivos (individual)</label>
+        <select id="usuario-dispositivos" multiple style="height:100px"></select>
+      </div>
+      <div class="form-group">
+        <label>Equipos (individual)</label>
+        <select id="usuario-equipos" multiple style="height:100px"></select>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" onclick="cerrarModal('modal-usuario')">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal Equipo -->
+<div id="modal-equipo" class="modal-overlay hidden" onclick="if(event.target===this)cerrarModal('modal-equipo')">
+  <div class="modal">
+    <h3 id="modal-equipo-titulo">Nuevo equipo</h3>
+    <form onsubmit="guardarEquipo(event)">
+      <input type="hidden" id="equipo-id">
+      <div class="form-group"><label>ID Equipo</label><input id="equipo-id_equipo" required></div>
+      <div class="form-group"><label>Nombre</label><input id="equipo-nombre" required></div>
+      <div class="form-group"><label>IMEI (opcional)</label><input id="equipo-imei"></div>
+      <div class="form-group"><label>Ubicación</label><input id="equipo-ubicacion"></div>
+      <div class="form-row">
+        <div class="form-group"><label>Temperatura °C</label><input type="number" step="0.1" id="equipo-temp"></div>
+        <div class="form-group"><label>Humedad %</label><input type="number" step="0.1" id="equipo-humedad"></div>
+      </div>
+      <div class="form-group form-check"><input type="checkbox" id="equipo-alarma" checked><label for="equipo-alarma">Alarmas activas</label></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" onclick="cerrarModal('modal-equipo')">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal Control Dispositivo -->
+<div id="modal-control" class="modal-overlay hidden" onclick="if(event.target===this)cerrarModal('modal-control')">
+  <div class="modal" style="max-width:720px">
+    <h3>📡 Control de dispositivo</h3>
+    <p id="control-disp-info" style="color:var(--muted);font-size:0.9rem;margin-bottom:16px"></p>
+
+    <div id="control-offline-msg" class="hidden card-panel" style="margin-bottom:16px;border-color:var(--red)">
+      <strong style="color:var(--red)">Dispositivo no online</strong>
+      <p style="font-size:0.85rem;margin-top:8px">Primero se valida la conexión. Las alertas de telemetría se evalúan solo cuando está online.</p>
+    </div>
+
+    <div class="card-panel" style="margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h3 style="margin:0">Telemetría en vivo</h3>
+        <button type="button" class="btn btn-sm btn-secondary" onclick="refrescarLiveControl()">🔄 Actualizar</button>
+      </div>
+      <div id="control-sensores" class="stats-grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr))"></div>
+      <p id="control-live-error" class="hidden" style="color:var(--yellow);font-size:0.85rem;margin-top:8px"></p>
+      <p id="control-rango-info" style="font-size:0.85rem;color:var(--muted);margin-top:12px"></p>
+    </div>
+
+    <form onsubmit="guardarMonitoreo(event)">
+      <input type="hidden" id="control-disp-id">
+      <div class="form-row">
+        <div class="form-group">
+          <label>Set de control (°C) — vacío = usa set_point de API</label>
+          <input type="number" step="0.1" id="control-set">
+        </div>
+        <div class="form-group">
+          <label>Delta (±°C) — vacío = ±5</label>
+          <input type="number" step="0.1" id="control-delta" min="0">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Sensor para validar rango</label>
+        <select id="control-sensor">
+          <option value="return_air">Sensor de Retorno</option>
+          <option value="temp_supply_1">Sensor de Suministro</option>
+        </select>
+      </div>
+      <div class="form-group form-check">
+        <input type="checkbox" id="control-alerta-setpoint" checked>
+        <label for="control-alerta-setpoint">Alertar cambio de SETPOINT (requiere Set de control configurado)</label>
+      </div>
+      <div class="form-group form-check">
+        <input type="checkbox" id="control-alarma-activa">
+        <label for="control-alarma-activa">Monitoreo activo (enviar alertas)</label>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" onclick="evaluarAhora()">⚡ Evaluar ahora</button>
+        <button type="button" class="btn btn-secondary" onclick="cerrarModal('modal-control')">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar y monitorear</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal Test Alarma -->
+<div id="modal-test" class="modal-overlay hidden" onclick="if(event.target===this)cerrarModal('modal-test')">
+  <div class="modal">
+    <h3>🧪 Enviar prueba de alarma</h3>
+    <p id="test-disp-info" style="margin-bottom:16px;color:var(--muted);font-size:0.9rem"></p>
+    <div id="test-usuarios-wrap">
+      <label style="font-size:0.85rem;color:var(--muted);display:block;margin-bottom:8px">Se enviará WhatsApp a:</label>
+      <ul id="test-usuarios-list" style="list-style:none;margin-bottom:16px"></ul>
+    </div>
+    <p id="test-sin-usuarios" class="hidden" style="color:var(--yellow);font-size:0.9rem">
+      No hay usuarios asignados. Ve a <strong>Usuarios</strong>, edita un usuario y asígnale el equipo con IMEI correspondiente.
+    </p>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secondary" onclick="cerrarModal('modal-test')">Cancelar</button>
+      <button type="button" class="btn btn-primary" id="btn-confirmar-test" onclick="confirmarTestAlarma()">Enviar prueba</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal Test Estado -->
+<div id="modal-test-estado" class="modal-overlay hidden" onclick="if(event.target===this)cerrarModal('modal-test-estado')">
+  <div class="modal modal-wide">
+    <h3>📊 Test envío de estado</h3>
+    <p id="test-estado-usuarios-info" class="hint" style="margin-bottom:12px"></p>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:12px;flex-wrap:wrap">
+      <label class="form-check" style="font-size:0.85rem;margin:0">
+        <input type="checkbox" id="test-estado-sel-todos" onchange="toggleTestEstadoTodos(this.checked)"> Seleccionar todos
+      </label>
+      <span id="test-estado-contador" class="hint" style="margin:0"></span>
+    </div>
+    <div id="test-estado-sin-disp" class="hidden" style="color:var(--yellow);font-size:0.9rem;margin-bottom:12px">
+      Los usuarios seleccionados no tienen dispositivos asignados.
+    </div>
+    <div class="table-wrap" style="max-height:420px;overflow-y:auto">
+      <table class="test-estado-table">
+        <thead>
+          <tr>
+            <th style="width:36px"></th>
+            <th>Dispositivo</th>
+            <th>Grupo</th>
+            <th>Link</th>
+            <th>Estado</th>
+            <th>Alerta</th>
+            <th>Usuarios</th>
+          </tr>
+        </thead>
+        <tbody id="test-estado-disp-list"></tbody>
+      </table>
+    </div>
+    <p class="hint" style="margin-top:12px">Los dispositivos con alarma detectada vienen preseleccionados. Se envía 1 mensaje por dispositivo (cada 2 s) y resumen por grupo.</p>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secondary" onclick="cerrarModal('modal-test-estado')">Cancelar</button>
+      <button type="button" class="btn btn-primary" id="btn-confirmar-test-estado" onclick="confirmarTestEstado()">Enviar estado</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

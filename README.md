@@ -75,7 +75,33 @@ docker compose logs -f bot
 curl http://localhost:9301/health
 ```
 
-## Despliegue en servidor Ubuntu
+### 5. Panel de administración
+
+Abre **http://localhost:9301/admin** e ingresa el valor de `API_SECRET` de tu `.env`.
+
+Desde el panel puedes:
+
+- **Dashboard** — resumen de dispositivos (online/wait/offline) y estado del bot
+- **Dispositivos** — sincronizar desde la API externa, activar/desactivar alarmas por IMEI
+- **Usuarios** — crear usuarios WhatsApp y asignarles equipos
+- **Equipos** — gestionar equipos reefer manualmente
+- **Alertas** — ver historial y marcar como resueltas
+- **Configuración** — URL de la API, umbrales online/wait/offline e intervalo de monitor
+
+La API de dispositivos por defecto es:
+
+```
+POST http://161.132.53.51:9050/Tunel/dispositivos/reporte/
+{
+  "mes": 5,
+  "anio": 2026,
+  "online_hasta_horas": 1,
+  "wait_hasta_horas": 24
+}
+```
+
+El mes y año se envían automáticamente con la fecha actual al sincronizar.
+
 
 El script `deploy.sh` instala Docker, configura el firewall y levanta los contenedores:
 
