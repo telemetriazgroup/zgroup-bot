@@ -64,6 +64,9 @@
         <button class="filter-btn" data-estado="wait">Wait</button>
         <button class="filter-btn" data-estado="offline">Offline</button>
       </div>
+      <input type="search" id="disp-buscar" class="search-input" style="max-width:420px;margin-bottom:12px"
+        placeholder="Buscar por IMEI, nombre, IP o link…" oninput="renderDispositivos()">
+      <p id="disp-buscar-contador" class="hint" style="margin:-4px 0 10px"></p>
       <div class="table-wrap">
         <table>
           <thead>
@@ -206,16 +209,40 @@
       <div class="page-header"><h2>Configuración</h2></div>
       <div class="config-grid">
         <div class="card-panel">
-          <h3>API de dispositivos</h3>
+          <h3>Conexión WhatsApp</h3>
+          <p id="config-bot-status" class="hint">Verificando…</p>
+          <p class="hint" style="margin-bottom:12px">
+            Visor QR: <a id="config-bot-qr-link" href="http://localhost:9300" target="_blank" rel="noopener">puerto 9300</a>
+          </p>
+          <p id="config-bot-modo" class="hint" style="margin-bottom:10px">Modo: —</p>
+          <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:10px">
+            <button type="button" class="btn btn-primary" onclick="vincularPorQrBot()">📷 Iniciar vinculación QR</button>
+            <button type="button" class="btn btn-secondary" onclick="vincularPorCodigoBot()">🔢 Iniciar vinculación por código</button>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:10px">
+            <button type="button" class="btn btn-secondary" onclick="reiniciarBotWhatsApp(false)">🔄 Reconectar sesión</button>
+            <button type="button" class="btn btn-secondary" onclick="pedirNuevoQrBot()">🔲 Pedir nuevo QR</button>
+          </div>
+          <p class="hint" style="margin-top:8px">
+            <label>Teléfono (código país, sin +):</label>
+            <input type="text" id="config-whatsapp-phone" placeholder="519XXXXXXXX" style="max-width:180px;margin-left:8px">
+          </p>
+          <p class="hint" style="margin-top:4px;color:var(--yellow)">
+            Con código activo: no pulses otra vez «Vincular con código». Usa el mismo código en el teléfono.
+          </p>
+          <p class="hint" style="margin-top:12px">
+            Cliente: <strong>whatsapp-web.js</strong> (Chromium = mismo canal que WhatsApp Web).
+            <strong>Iniciar vinculación QR</strong> (recomendado) muestra QR en :9300 — escanea como en web.whatsapp.com.
+            <strong>Iniciar vinculación por código</strong> es opcional; si falla, usa QR.
+          </p>
+          <div id="config-bot-diagnostico" class="card-panel" style="margin-top:16px;padding:12px;background:var(--surface2)">
+            <h4 style="margin:0 0 10px;font-size:0.95rem">Diagnóstico paso a paso</h4>
+            <ul id="config-bot-pasos" class="steps" style="list-style:none;padding:0;margin:0;font-size:0.85rem"></ul>
+          </div>
+        </div>
+        <div class="card-panel">
+          <h3>Parámetros globales</h3>
           <form id="form-config-api" onsubmit="guardarConfig(event)">
-            <div class="form-group">
-              <label>URL API dispositivos (reporte)</label>
-              <input name="url" id="cfg-url">
-            </div>
-            <div class="form-group">
-              <label>URL API telemetría live</label>
-              <input name="url_live" id="cfg-url-live">
-            </div>
             <div class="form-row">
               <div class="form-group">
                 <label>Online hasta (horas)</label>
@@ -235,8 +262,13 @@
               <div class="form-check"><input type="checkbox" id="cfg-alerta-wait"><label for="cfg-alerta-wait">Alertar wait</label></div>
               <div class="form-check"><input type="checkbox" id="cfg-alerta-offline"><label for="cfg-alerta-offline">Alertar offline</label></div>
             </div>
-            <button type="submit" class="btn btn-primary" style="margin-top:12px">Guardar configuración</button>
+            <button type="submit" class="btn btn-primary" style="margin-top:12px">Guardar parámetros</button>
           </form>
+        </div>
+        <div class="card-panel">
+          <h3>Links de API</h3>
+          <p class="hint">Cada link sincroniza dispositivos y consulta telemetría live desde su propia URL. Mes/año se envían automáticamente según la fecha actual.</p>
+          <div id="config-links-list"></div>
         </div>
         <div class="card-panel">
           <h3>Tipos de alerta</h3>
@@ -399,6 +431,53 @@
         <input type="checkbox" id="control-alarma-activa">
         <label for="control-alarma-activa">Monitoreo activo (enviar alertas)</label>
       </div>
+
+      <div class="card-panel" style="margin-top:16px">
+        <h3 style="margin:0 0 12px">📋 Seguimiento de proceso CA (informe)</h3>
+        <div class="form-group">
+          <label>Receta</label>
+          <input type="text" id="ca-receta" placeholder='Ej: PRUEBA CA 19/05/2026' list="ca-recetas-list">
+          <datalist id="ca-recetas-list">
+            <option value="PRUEBA CA 19/05/2026">
+          </datalist>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Tipo de fruta</label>
+            <select id="ca-tipo-fruta" onchange="toggleCaVariacion()">
+              <option value="">— Seleccionar —</option>
+              <option value="Palta aguacate">Palta aguacate</option>
+              <option value="Uva">Uva</option>
+              <option value="Cítricos">Cítricos</option>
+              <option value="Otro">Otro</option>
+            </select>
+          </div>
+          <div class="form-group" id="ca-variacion-wrap">
+            <label>Variación (HASS para palta)</label>
+            <input type="text" id="ca-variacion" placeholder="HASS">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Lugar de procedencia</label>
+          <input type="text" id="ca-procedencia" placeholder="Ej: La Libertad, Perú">
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Inicio de proceso (fecha exacta)</label>
+            <input type="datetime-local" id="ca-fecha-inicio">
+          </div>
+          <div class="form-group">
+            <label>Fin de proceso (fecha exacta)</label>
+            <input type="datetime-local" id="ca-fecha-fin">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Serie máquina CA (auto si receta PRUEBA CA 19/05/2026 → CIM1086751)</label>
+          <input type="text" id="ca-maquina-serie" placeholder="CIM1086751">
+        </div>
+        <p id="ca-maquina-auto-hint" class="hint hidden">Para la receta PRUEBA CA 19/05/2026 se usará la serie CIM1086751 en el informe.</p>
+      </div>
+
       <div class="modal-actions">
         <button type="button" class="btn btn-secondary" onclick="evaluarAhora()">⚡ Evaluar ahora</button>
         <button type="button" class="btn btn-secondary" onclick="cerrarModal('modal-control')">Cancelar</button>
@@ -451,13 +530,18 @@
             <th>Link</th>
             <th>Estado</th>
             <th>Alerta</th>
+            <th>12h</th>
             <th>Usuarios</th>
           </tr>
         </thead>
         <tbody id="test-estado-disp-list"></tbody>
       </table>
     </div>
-    <p class="hint" style="margin-top:12px">Los dispositivos con alarma detectada vienen preseleccionados. Se envía 1 mensaje por dispositivo (cada 2 s) y resumen por grupo.</p>
+    <label class="form-check" style="font-size:0.85rem;margin:12px 0 0;display:flex;align-items:center;gap:8px">
+      <input type="checkbox" id="test-estado-analisis-12h" checked>
+      Incluir análisis fuera de rango (12h + gráfica) para dispositivos link1 con alarma
+    </label>
+    <p class="hint" style="margin-top:8px">Los dispositivos con alarma detectada vienen preseleccionados. Se envía 1 mensaje por dispositivo (cada 2 s), gráfica 12h si aplica, y resumen por grupo.</p>
     <div class="modal-actions">
       <button type="button" class="btn btn-secondary" onclick="cerrarModal('modal-test-estado')">Cancelar</button>
       <button type="button" class="btn btn-primary" id="btn-confirmar-test-estado" onclick="confirmarTestEstado()">Enviar estado</button>

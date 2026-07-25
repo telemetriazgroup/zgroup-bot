@@ -1,5 +1,4 @@
 const { db } = require('../db')
-const { logger } = require('../logger')
 
 const URL_LIVE_DEFAULT = 'http://161.132.53.51:9050/Tunel/decodificado/live/'
 
@@ -11,9 +10,17 @@ const SENSORES = {
   compress_coil_1:  'Temperatura de Compresor'
 }
 
-async function fetchLiveData(imei) {
-  const config = await db.obtenerConfigApi()
-  const url = config?.url_live || URL_LIVE_DEFAULT
+async function resolverUrlLive(imei, linkOrigen = null) {
+  if (!linkOrigen) {
+    const disp = await db.obtenerDispositivoPorImei(imei)
+    linkOrigen = disp?.link_origen || 'link1'
+  }
+  const link = await db.obtenerConfigLink(linkOrigen)
+  return { url: link?.url_live || URL_LIVE_DEFAULT, link_id: linkOrigen }
+}
+
+async function fetchLiveData(imei, linkOrigen = null) {
+  const { url, link_id } = await resolverUrlLive(imei, linkOrigen)
 
   const res = await fetch(url, {
     method: 'POST',
@@ -23,11 +30,11 @@ async function fetchLiveData(imei) {
 
   if (!res.ok) {
     const txt = await res.text()
-    throw new Error(`API live respondió ${res.status}: ${txt.slice(0, 200)}`)
+    throw new Error(`[${link_id}] API live respondió ${res.status}: ${txt.slice(0, 200)}`)
   }
 
   const data = await res.json()
-  if (!data.ultimo) throw new Error('Sin datos de telemetría en respuesta live')
+  if (!data.ultimo) throw new Error(`[${link_id}] Sin datos de telemetría en respuesta live`)
 
   return data
 }
@@ -51,4 +58,4 @@ function formatearSensores(ultimo) {
   }))
 }
 
-module.exports = { fetchLiveData, extraerTelemetria, formatearSensores, SENSORES, URL_LIVE_DEFAULT }
+module.exports = { fetchLiveData, extraerTelemetria, formatearSensores, SENSORES, URL_LIVE_DEFAULT, resolverUrlLive }

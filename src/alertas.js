@@ -127,6 +127,19 @@ router.put('/config', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
+router.get('/config/links', async (req, res) => {
+  try { res.json(await db.listarConfigLinks()) }
+  catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.put('/config/links/:link_id', async (req, res) => {
+  try {
+    const link = await db.actualizarConfigLink(req.params.link_id, req.body)
+    if (!link) return res.status(404).json({ error: 'Link no encontrado' })
+    res.json(link)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
 // ── Dispositivos ────────────────────────────────────────────
 
 router.get('/dispositivos', async (req, res) => {
@@ -200,6 +213,32 @@ router.put('/dispositivos/:id/monitoreo', async (req, res) => {
       ? await evaluarDispositivo(id, { notificar: true })
       : null
     res.json({ dispositivo: disp, evaluacion })
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.get('/dispositivos/:id/proceso-ca', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id)
+    const disp = await db.obtenerDispositivoPorId(id)
+    if (!disp) return res.status(404).json({ error: 'Dispositivo no encontrado' })
+    const proceso = await db.obtenerProcesoCa(id)
+    res.json({ dispositivo_id: id, proceso })
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.put('/dispositivos/:id/proceso-ca', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id)
+    const disp = await db.obtenerDispositivoPorId(id)
+    if (!disp) return res.status(404).json({ error: 'Dispositivo no encontrado' })
+    const { prepararProcesoParaGuardar } = require('./services/informe-ca')
+    if (req.body.limpiar) {
+      await db.eliminarProcesoCa(id)
+      return res.json({ ok: true, proceso: null })
+    }
+    const data = prepararProcesoParaGuardar(req.body)
+    const proceso = await db.guardarProcesoCa(id, data)
+    res.json({ ok: true, proceso })
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
@@ -283,8 +322,10 @@ router.get('/usuarios/:id/asignaciones', async (req, res) => {
 
 router.post('/usuarios/:id/test-estado', async (req, res) => {
   try {
-    const { dispositivo_ids } = req.body || {}
-    const result = await enviarTestEstadoUsuario(parseInt(req.params.id), dispositivo_ids)
+    const { dispositivo_ids, incluir_analisis_12h } = req.body || {}
+    const result = await enviarTestEstadoUsuario(parseInt(req.params.id), dispositivo_ids, {
+      incluirAnalisis12h: incluir_analisis_12h !== false
+    })
     if (result.error) return res.status(503).json(result)
     res.json({ ok: true, ...result })
   } catch (err) {
@@ -306,11 +347,13 @@ router.post('/asignaciones/test-estado/preview', async (req, res) => {
 })
 
 router.post('/asignaciones/test-estado', async (req, res) => {
-  const { usuario_ids, dispositivo_ids } = req.body
+  const { usuario_ids, dispositivo_ids, incluir_analisis_12h } = req.body
   if (!usuario_ids?.length) return res.status(400).json({ error: 'Selecciona al menos un usuario' })
   if (!dispositivo_ids?.length) return res.status(400).json({ error: 'Selecciona al menos un dispositivo' })
   try {
-    const resultados = await enviarTestEstadoMultiples(usuario_ids, dispositivo_ids)
+    const resultados = await enviarTestEstadoMultiples(usuario_ids, dispositivo_ids, {
+      incluirAnalisis12h: incluir_analisis_12h !== false
+    })
     res.json({ ok: true, resultados })
   } catch (err) {
     logger.error('Error test estado múltiple:', err)
@@ -321,9 +364,83 @@ router.post('/asignaciones/test-estado', async (req, res) => {
 // ── Estado bot ──────────────────────────────────────────────
 
 router.get('/bot/status', async (req, res) => {
-  const { getSock } = require('./bot')
-  const sock = getSock()
-  res.json({ conectado: !!sock?.user, usuario: sock?.user?.id || null })
+  const { obtenerEstadoBot } = require('./bot')
+  res.json(obtenerEstadoBot())
+})
+
+router.get('/bot/diagnostico', async (req, res) => {
+  const { obtenerDiagnosticoCompleto } = require('./bot')
+  res.json(obtenerDiagnosticoCompleto())
+})
+
+router.post('/bot/vincular-qr', async (req, res) => {
+  const { iniciarVinculacionPorQr } = require('./bot')
+  try {
+    await iniciarVinculacionPorQr()
+    res.json({
+      ok: true,
+      mensaje: 'Modo QR activo. Abre http://localhost:9300 y escanea.',
+      ...require('./bot').obtenerEstadoBot()
+    })
+  } catch (err) {
+    logger.error('Error vinculación QR:', err)
+    res.status(400).json({ error: err.message })
+  }
+})
+
+router.post('/bot/vincular-codigo', async (req, res) => {
+  const { iniciarVinculacionPorCodigo } = require('./bot')
+  try {
+    const telefono = req.body?.telefono
+    const codigo = await iniciarVinculacionPorCodigo(telefono)
+    res.json({
+      ok: true,
+      codigo,
+      mensaje: 'Introduce el código en WhatsApp → Dispositivos vinculados → Vincular con número de teléfono',
+      ...require('./bot').obtenerEstadoBot()
+    })
+  } catch (err) {
+    logger.error('Error vinculación por código:', err)
+    res.status(400).json({ error: err.message })
+  }
+})
+
+router.post('/bot/nuevo-qr', async (req, res) => {
+  const { pedirNuevoQrManual } = require('./bot')
+  try {
+    await pedirNuevoQrManual()
+    res.json({
+      ok: true,
+      mensaje: 'Generando nuevo QR. Espera ~2 min por código o pide otro manualmente.',
+      ...require('./bot').obtenerEstadoBot()
+    })
+  } catch (err) {
+    logger.error('Error pidiendo nuevo QR:', err)
+    res.status(400).json({ error: err.message })
+  }
+})
+
+router.post('/bot/reiniciar', async (req, res) => {
+  const { reiniciarWhatsApp } = require('./bot')
+  const nuevaVinculacion = req.body?.nueva_vinculacion === true
+  try {
+    if (nuevaVinculacion && req.body?.confirmar !== true) {
+      return res.status(400).json({
+        error: 'Confirma nueva_vinculacion y confirmar:true para borrar la sesión actual'
+      })
+    }
+    await reiniciarWhatsApp({ nuevaVinculacion })
+    res.json({
+      ok: true,
+      mensaje: nuevaVinculacion
+        ? 'Sesión reiniciada. Escanea el QR en el puerto 9300.'
+        : 'Reconexión iniciada. Espera unos segundos.',
+      ...require('./bot').obtenerEstadoBot()
+    })
+  } catch (err) {
+    logger.error('Error reiniciando bot:', err)
+    res.status(500).json({ error: err.message })
+  }
 })
 
 module.exports = router

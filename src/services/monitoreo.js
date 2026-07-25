@@ -1,6 +1,8 @@
 const { db } = require('../db')
 const { logger } = require('../logger')
 const { fetchLiveData, extraerTelemetria, SENSORES } = require('./live')
+const { analizarYGenerarGrafica } = require('./historico')
+const { formatearSeguimientoProceso } = require('./informe-ca')
 
 const DELTA_DEFAULT = 5
 
@@ -11,7 +13,7 @@ const TIPO_ALERTA = {
   cambio_setpoint: 'CAMBIO DE SETPOINT detectado'
 }
 
-async function dispararAlerta(disp, codigo, { detalle, temperatura, nivel = 'normal' }) {
+async function dispararAlerta(disp, codigo, { detalle, temperatura, nivel = 'normal', imagenBuffer = null, analisisHistorico = null }) {
   const configs = await db.listarConfigAlertas()
   const cfg = configs.find(c => c.tipo === codigo)
   if (cfg && !cfg.activo) return null
@@ -29,11 +31,19 @@ async function dispararAlerta(disp, codigo, { detalle, temperatura, nivel = 'nor
     codigo
   })
 
+  const proceso = await db.obtenerProcesoCa(disp.id)
+  const seguimientoCa = formatearSeguimientoProceso(proceso)
+
   const mensajeExtra =
     `\n📦 *${nombre}*\n` +
     `🔢 IMEI: ${disp.imei}\n` +
     (temperatura != null ? `🌡️ ${temperatura}°C\n` : '') +
-    `📋 ${detalle}`
+    (analisisHistorico?.mensajeHoras ? `\n🔴 *${analisisHistorico.mensajeHoras}*\n` : '') +
+    seguimientoCa +
+    `📋 ${detalle}` +
+    (analisisHistorico?.maxHorasContinuas >= 2
+      ? `\n📊 Análisis 12h: ${analisisHistorico.horasEnteras}h continuas fuera de rango (${analisisHistorico.totalFuera}/${analisisHistorico.totalRegistros} lecturas)`
+      : '')
 
   const sock = require('../bot').getSock()
   if (!sock) return { enviados: 0 }
@@ -52,7 +62,12 @@ async function dispararAlerta(disp, codigo, { detalle, temperatura, nivel = 'nor
   let enviados = 0
   for (const u of usuarios) {
     try {
-      await sock.sendMessage(`${u.telefono}@s.whatsapp.net`, { text: mensaje })
+      const jid = `${u.telefono}@s.whatsapp.net`
+      if (imagenBuffer) {
+        await sock.sendMessage(jid, { image: imagenBuffer, caption: mensaje })
+      } else {
+        await sock.sendMessage(jid, { text: mensaje })
+      }
       enviados++
     } catch (err) {
       logger.error(`Error alerta ${codigo} a ${u.telefono}:`, err.message)
@@ -94,7 +109,7 @@ async function evaluarDispositivo(dispositivoId, { notificar = true } = {}) {
   // ── 2. Online → consultar telemetría live ───────────────
   let live
   try {
-    live = await fetchLiveData(disp.imei)
+    live = await fetchLiveData(disp.imei, disp.link_origen)
   } catch (err) {
     logger.warn(`Live API falló para ${disp.imei}: ${err.message}`)
     return { online: true, error: err.message, alertas }
@@ -145,10 +160,25 @@ async function evaluarDispositivo(dispositivoId, { notificar = true } = {}) {
     if (!dentroRango) {
       const pendiente = await db.tieneAlertaPendiente(disp.imei, 'fuera_de_rango')
       if (notificar && !pendiente) {
+        let detalleFinal = `${sensorNombre}: ${sensorVal}°C | Rango: ${min}°C a ${max}°C (Set ${setRef}°C ±${delta})`
+        let imagenBuffer = null
+        let analisisHistorico = null
+
+        if ((disp.link_origen || 'link1') === 'link1') {
+          const { analisis, imagen } = await analizarYGenerarGrafica(disp, { setRef, delta })
+          analisisHistorico = analisis
+          imagenBuffer = imagen
+          if (analisis?.mensajeHoras) {
+            detalleFinal = `${analisis.mensajeHoras}\n${detalleFinal}`
+          }
+        }
+
         const r = await dispararAlerta(disp, 'fuera_de_rango', {
-          detalle: `${sensorNombre}: ${sensorVal}°C | Rango: ${min}°C a ${max}°C (Set ${setRef}°C ±${delta})`,
+          detalle: detalleFinal,
           temperatura: sensorVal,
-          nivel: 'critico'
+          nivel: 'critico',
+          imagenBuffer,
+          analisisHistorico
         })
         if (r) alertas.push('fuera_de_rango')
       }
@@ -196,7 +226,7 @@ async function obtenerLiveDispositivo(dispositivoId) {
 
   if (disp.estado_conexion === 'online') {
     try {
-      live = await fetchLiveData(disp.imei)
+      live = await fetchLiveData(disp.imei, disp.link_origen)
       sensores = Object.entries(SENSORES).map(([key, label]) => ({
         key,
         label,

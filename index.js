@@ -1,6 +1,10 @@
 require('dotenv').config()
 const path = require('path')
 const express = require('express')
+const { initEstadoVinculo } = require('./src/bot-estado')
+
+initEstadoVinculo('Bot arrancando — preparando WhatsApp…')
+
 const { conectarWhatsApp } = require('./src/bot')
 const alertasRouter = require('./src/alertas')
 const { db } = require('./src/db')
@@ -29,7 +33,11 @@ async function iniciar() {
   try {
     await db.initDb()
     logger.info('✅ Base de datos inicializada')
-    await conectarWhatsApp()
+    try {
+      await conectarWhatsApp()
+    } catch (err) {
+      logger.error('WhatsApp no conectó al arranque:', err.message)
+    }
     app.listen(PORT, () => {
       logger.info(`🚀 API ZGroup escuchando en puerto ${PORT}`)
       logger.info(`🖥️  Panel admin: http://localhost:${PORT}/admin`)

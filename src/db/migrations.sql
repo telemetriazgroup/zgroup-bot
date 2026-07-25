@@ -76,6 +76,7 @@ ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS telemetria_actualizada TIMESTA
 ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS link_origen VARCHAR(20) DEFAULT 'link1';
 ALTER TABLE config_api ADD COLUMN IF NOT EXISTS url_live VARCHAR(500) DEFAULT 'http://161.132.53.51:9050/Tunel/decodificado/live/';
 ALTER TABLE config_api ADD COLUMN IF NOT EXISTS link_id VARCHAR(20) DEFAULT 'link1';
+ALTER TABLE config_links ADD COLUMN IF NOT EXISTS url_historico VARCHAR(500);
 
 ALTER TABLE equipos ADD COLUMN IF NOT EXISTS imei VARCHAR(20);
 ALTER TABLE equipos ADD COLUMN IF NOT EXISTS alarmas_activas BOOLEAN NOT NULL DEFAULT true;
@@ -108,5 +109,47 @@ CREATE TABLE IF NOT EXISTS usuario_dispositivos (
   usuario_id     INTEGER NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
   dispositivo_id INTEGER NOT NULL REFERENCES dispositivos(id) ON DELETE CASCADE,
   PRIMARY KEY (usuario_id, dispositivo_id)
+);
+
+-- Links de API (Tunel, TermoKing, etc.)
+CREATE TABLE IF NOT EXISTS config_links (
+  id            SERIAL PRIMARY KEY,
+  link_id       VARCHAR(20)  NOT NULL UNIQUE,
+  nombre        VARCHAR(100) NOT NULL,
+  url_reporte   VARCHAR(500) NOT NULL,
+  url_live      VARCHAR(500) NOT NULL,
+  url_historico VARCHAR(500),
+  tipo_default  VARCHAR(50)  DEFAULT 'Tunel',
+  activo        BOOLEAN      NOT NULL DEFAULT true,
+  actualizado_en TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO config_links (link_id, nombre, url_reporte, url_live, url_historico, tipo_default) VALUES
+  ('link1', 'Tunel',
+   'http://161.132.53.51:9050/Tunel/dispositivos/reporte/',
+   'http://161.132.53.51:9050/Tunel/decodificado/live/',
+   'http://161.132.53.51:9050/Tunel/decodificado/imei/',
+   'Tunel'),
+  ('link2', 'TermoKing',
+   'http://161.132.53.51:9050/TermoKing/dispositivos/reporte/',
+   'http://161.132.53.51:9050/TermoKing/decodificado/live/',
+   NULL,
+   'TermoKing')
+ON CONFLICT (link_id) DO NOTHING;
+
+UPDATE config_links SET url_historico = 'http://161.132.53.51:9050/Tunel/decodificado/imei/'
+WHERE link_id = 'link1' AND (url_historico IS NULL OR url_historico = '');
+
+-- Proceso CA por dispositivo (informe / seguimiento)
+CREATE TABLE IF NOT EXISTS proceso_ca (
+  dispositivo_id  INTEGER PRIMARY KEY REFERENCES dispositivos(id) ON DELETE CASCADE,
+  receta          VARCHAR(200),
+  tipo_fruta      VARCHAR(100),
+  variacion       VARCHAR(100),
+  procedencia     VARCHAR(200),
+  fecha_inicio    TIMESTAMPTZ,
+  fecha_fin       TIMESTAMPTZ,
+  maquina_serie   VARCHAR(50),
+  actualizado_en  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

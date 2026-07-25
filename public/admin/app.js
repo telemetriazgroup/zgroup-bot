@@ -122,7 +122,10 @@ async function syncDispositivos(conAlertas) {
     toast('Sincronizando dispositivos…')
     const q = conAlertas ? '?alertas=true' : ''
     const r = await api('/dispositivos/sync' + q, { method: 'POST' })
-    toast(`Sincronizados ${r.sincronizados} dispositivos`)
+    const detalle = (r.por_link || [])
+      .map(l => l.error ? `${l.link_id}: error` : `${l.link_id}: ${l.sincronizados}`)
+      .join(' · ')
+    toast(`Sincronizados ${r.sincronizados} dispositivos${detalle ? ` (${detalle})` : ''}`)
     cargarDashboard()
     if (document.getElementById('sec-dispositivos').classList.contains('active')) cargarDispositivos()
   } catch (err) { toast(err.message, 'error') }
@@ -133,13 +136,35 @@ async function syncDispositivos(conAlertas) {
 async function cargarDispositivos() {
   try {
     const q = filtroEstado ? `?estado=${filtroEstado}` : ''
-    const list = await api('/dispositivos' + q)
-    const tbody = document.getElementById('tbody-dispositivos')
-    if (!list.length) {
-      tbody.innerHTML = '<tr><td colspan="9" class="empty">Sin dispositivos. Pulsa Sincronizar API.</td></tr>'
-      return
-    }
-    tbody.innerHTML = list.map(d => `
+    dispositivosCache = await api('/dispositivos' + q)
+    renderDispositivos()
+  } catch (err) { toast(err.message, 'error') }
+}
+
+function renderDispositivos() {
+  const buscar = (document.getElementById('disp-buscar')?.value || '').trim().toLowerCase()
+  const tbody = document.getElementById('tbody-dispositivos')
+  const contador = document.getElementById('disp-buscar-contador')
+
+  const list = dispositivosCache.filter(d => {
+    if (!buscar) return true
+    const txt = `${d.imei} ${d.nombre || ''} ${d.last_ip || ''} ${d.link_origen || ''} ${d.estado_conexion}`.toLowerCase()
+    return txt.includes(buscar)
+  })
+
+  if (contador) {
+    contador.textContent = buscar
+      ? `${list.length} de ${dispositivosCache.length} dispositivo(s)`
+      : `${dispositivosCache.length} dispositivo(s)`
+  }
+
+  if (!list.length) {
+    tbody.innerHTML = buscar
+      ? '<tr><td colspan="9" class="empty">Ningún dispositivo coincide con la búsqueda.</td></tr>'
+      : '<tr><td colspan="9" class="empty">Sin dispositivos. Pulsa Sincronizar API.</td></tr>'
+    return
+  }
+  tbody.innerHTML = list.map(d => `
       <tr>
         <td><span class="badge badge-link">${d.link_origen || 'link1'}</span></td>
         <td>
@@ -163,7 +188,6 @@ async function cargarDispositivos() {
         </td>
       </tr>
     `).join('')
-  } catch (err) { toast(err.message, 'error') }
 }
 
 async function toggleAlarma(id, activa) {
@@ -185,6 +209,77 @@ async function abrirControlDisp(id) {
   document.getElementById('control-disp-id').value = id
   document.getElementById('modal-control').classList.remove('hidden')
   await cargarLiveControl(id)
+}
+
+function toDatetimeLocal(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  const pad = n => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+function fromDatetimeLocal(val) {
+  if (!val) return null
+  return new Date(val).toISOString()
+}
+
+function toggleCaVariacion() {
+  const tipo = document.getElementById('ca-tipo-fruta')?.value || ''
+  const wrap = document.getElementById('ca-variacion-wrap')
+  const input = document.getElementById('ca-variacion')
+  const esPalta = /palta|aguacate/i.test(tipo)
+  if (wrap) wrap.style.display = esPalta || tipo === 'Otro' ? '' : 'none'
+  if (esPalta && input && !input.value) input.value = 'HASS'
+}
+
+function actualizarHintMaquinaCa() {
+  const receta = (document.getElementById('ca-receta')?.value || '').trim()
+  const hint = document.getElementById('ca-maquina-auto-hint')
+  const serie = document.getElementById('ca-maquina-serie')
+  if (receta === 'PRUEBA CA 19/05/2026') {
+    hint?.classList.remove('hidden')
+    if (serie && !serie.value) serie.value = 'CIM1086751'
+  } else {
+    hint?.classList.add('hidden')
+  }
+}
+
+document.getElementById('ca-receta')?.addEventListener('input', actualizarHintMaquinaCa)
+
+async function cargarProcesoCa(id) {
+  try {
+    const { proceso } = await api(`/dispositivos/${id}/proceso-ca`)
+    const p = proceso || {}
+    document.getElementById('ca-receta').value = p.receta || ''
+    document.getElementById('ca-tipo-fruta').value = p.tipo_fruta || ''
+    document.getElementById('ca-variacion').value = p.variacion || ''
+    document.getElementById('ca-procedencia').value = p.procedencia || ''
+    document.getElementById('ca-fecha-inicio').value = toDatetimeLocal(p.fecha_inicio)
+    document.getElementById('ca-fecha-fin').value = toDatetimeLocal(p.fecha_fin)
+    document.getElementById('ca-maquina-serie').value = p.maquina_serie || ''
+    toggleCaVariacion()
+    actualizarHintMaquinaCa()
+  } catch {
+    /* sin proceso CA aún */
+  }
+}
+
+async function guardarProcesoCa(id) {
+  const body = {
+    receta: document.getElementById('ca-receta').value,
+    tipo_fruta: document.getElementById('ca-tipo-fruta').value,
+    variacion: document.getElementById('ca-variacion').value,
+    procedencia: document.getElementById('ca-procedencia').value,
+    fecha_inicio: fromDatetimeLocal(document.getElementById('ca-fecha-inicio').value),
+    fecha_fin: fromDatetimeLocal(document.getElementById('ca-fecha-fin').value),
+    maquina_serie: document.getElementById('ca-maquina-serie').value
+  }
+  const vacio = !body.receta && !body.tipo_fruta && !body.procedencia && !body.fecha_inicio && !body.fecha_fin
+  if (vacio) {
+    await api(`/dispositivos/${id}/proceso-ca`, { method: 'PUT', body: JSON.stringify({ limpiar: true }) })
+    return
+  }
+  await api(`/dispositivos/${id}/proceso-ca`, { method: 'PUT', body: JSON.stringify(body) })
 }
 
 async function cargarLiveControl(id) {
@@ -234,6 +329,7 @@ async function cargarLiveControl(id) {
     } else {
       rangoEl.textContent = 'Configure set/delta o espere datos live para ver el rango.'
     }
+    await cargarProcesoCa(id)
   } catch (err) { toast(err.message, 'error') }
 }
 
@@ -255,6 +351,7 @@ async function guardarMonitoreo(e) {
   }
   try {
     const r = await api(`/dispositivos/${id}/monitoreo`, { method: 'PUT', body: JSON.stringify(body) })
+    await guardarProcesoCa(id)
     const alertas = r.evaluacion?.alertas || []
     toast(alertas.length
       ? `Guardado. Alertas: ${alertas.join(', ')}`
@@ -791,8 +888,11 @@ function renderTestEstadoDispositivos(disps) {
   tbody.innerHTML = disps.map(d => {
     const sel = testEstadoDispSel.has(d.id)
     const alertaBadge = d.tiene_alerta
-      ? `<span class="badge badge-warn">🚨 ${d.alertas_pendientes || (d.fuera_rango ? 'Fuera rango' : 'Alarma')}</span>`
+      ? `<span class="badge badge-warn">🚨 ${d.fuera_rango ? 'Fuera rango' : (d.alertas_pendientes || 'Alarma')}</span>`
       : '<span class="badge badge-ok">OK</span>'
+    const analisis12h = d.elegible_analisis_12h
+      ? '<span class="badge badge-warn" title="Recibirá gráfica 12h">📈 Sí</span>'
+      : '<span class="hint">—</span>'
     return `
       <tr class="${sel ? 'test-estado-row-selected' : ''} ${d.tiene_alerta ? 'test-estado-row-alerta' : ''}">
         <td>
@@ -807,6 +907,7 @@ function renderTestEstadoDispositivos(disps) {
         <td><span class="badge badge-link">${d.link_origen || 'link1'}</span></td>
         <td>${badgeEstado(d.estado_conexion)}</td>
         <td>${alertaBadge}</td>
+        <td>${analisis12h}</td>
         <td style="font-size:0.8rem;color:var(--muted)">${(d.usuarios || []).join(', ')}</td>
       </tr>`
   }).join('')
@@ -853,9 +954,10 @@ async function confirmarTestEstado() {
   btn.textContent = 'Enviando...'
 
   try {
+    const incluir_analisis_12h = document.getElementById('test-estado-analisis-12h')?.checked !== false
     const res = await api('/asignaciones/test-estado', {
       method: 'POST',
-      body: JSON.stringify({ usuario_ids: testEstadoUsuarioIds, dispositivo_ids })
+      body: JSON.stringify({ usuario_ids: testEstadoUsuarioIds, dispositivo_ids, incluir_analisis_12h })
     })
     const total = (res.resultados || []).reduce((a, r) => a + (r.enviados || 0), 0)
     const errores = (res.resultados || []).filter(r => r.error || r.advertencia)
@@ -1073,18 +1175,52 @@ async function resolverAlerta(id) {
 
 async function cargarConfig() {
   try {
-    const [cfg, tipos] = await Promise.all([
+    const qrHost = `${window.location.protocol}//${window.location.hostname}:9300`
+    const qrLink = document.getElementById('config-bot-qr-link')
+    if (qrLink) {
+      qrLink.href = qrHost
+      qrLink.textContent = qrHost.replace(/^https?:\/\//, '')
+    }
+    await actualizarEstadoBotConfig()
+
+    const [cfg, tipos, links] = await Promise.all([
       api('/config'),
-      api('/config-alertas')
+      api('/config-alertas'),
+      api('/config/links')
     ])
-    document.getElementById('cfg-url').value = cfg.url || ''
-    document.getElementById('cfg-url-live').value = cfg.url_live || ''
     document.getElementById('cfg-online').value = cfg.online_hasta_horas
     document.getElementById('cfg-wait').value = cfg.wait_hasta_horas
     document.getElementById('cfg-intervalo').value = cfg.intervalo_minutos || 15
     document.getElementById('cfg-alerta-online').checked = cfg.alerta_online
     document.getElementById('cfg-alerta-wait').checked = cfg.alerta_wait
     document.getElementById('cfg-alerta-offline').checked = cfg.alerta_offline
+
+    document.getElementById('config-links-list').innerHTML = links.map(l => `
+      <div class="config-link-card" data-link="${l.link_id}">
+        <h4>
+          <span class="badge badge-link">${l.link_id}</span>
+          ${l.nombre}
+          <label class="switch" style="margin-left:auto" title="Activo">
+            <input type="checkbox" ${l.activo ? 'checked' : ''} onchange="toggleConfigLinkActivo('${l.link_id}', this.checked)">
+            <span class="slider"></span>
+          </label>
+        </h4>
+        <div class="form-group">
+          <label>URL reporte dispositivos</label>
+          <input id="link-${l.link_id}-reporte" value="${l.url_reporte || ''}">
+        </div>
+        <div class="form-group">
+          <label>URL telemetría live</label>
+          <input id="link-${l.link_id}-live" value="${l.url_live || ''}">
+        </div>
+        ${l.link_id === 'link1' ? `
+        <div class="form-group">
+          <label>URL histórico 12h (análisis fuera de rango)</label>
+          <input id="link-${l.link_id}-historico" value="${l.url_historico || ''}">
+        </div>` : ''}
+        <button type="button" class="btn btn-sm btn-primary" onclick="guardarConfigLink('${l.link_id}')">Guardar ${l.link_id}</button>
+      </div>
+    `).join('')
 
     document.getElementById('config-alertas-list').innerHTML = tipos.map(t => `
       <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--border)">
@@ -1104,8 +1240,6 @@ async function cargarConfig() {
 async function guardarConfig(e) {
   e.preventDefault()
   const body = {
-    url: document.getElementById('cfg-url').value,
-    url_live: document.getElementById('cfg-url-live').value,
     online_hasta_horas: parseFloat(document.getElementById('cfg-online').value),
     wait_hasta_horas: parseFloat(document.getElementById('cfg-wait').value),
     intervalo_minutos: parseInt(document.getElementById('cfg-intervalo').value),
@@ -1115,8 +1249,31 @@ async function guardarConfig(e) {
   }
   try {
     await api('/config', { method: 'PUT', body: JSON.stringify(body) })
-    toast('Configuración guardada')
+    toast('Parámetros guardados')
   } catch (err) { toast(err.message, 'error') }
+}
+
+async function guardarConfigLink(link_id) {
+  const body = {
+    url_reporte: document.getElementById(`link-${link_id}-reporte`).value,
+    url_live: document.getElementById(`link-${link_id}-live`).value
+  }
+  const hist = document.getElementById(`link-${link_id}-historico`)
+  if (hist) body.url_historico = hist.value
+  try {
+    await api(`/config/links/${link_id}`, { method: 'PUT', body: JSON.stringify(body) })
+    toast(`${link_id} guardado`)
+  } catch (err) { toast(err.message, 'error') }
+}
+
+async function toggleConfigLinkActivo(link_id, activo) {
+  try {
+    await api(`/config/links/${link_id}`, { method: 'PUT', body: JSON.stringify({ activo }) })
+    toast(`${link_id} ${activo ? 'activado' : 'desactivado'}`)
+  } catch (err) {
+    toast(err.message, 'error')
+    cargarConfig()
+  }
 }
 
 async function toggleConfigAlerta(tipo, activo) {
@@ -1124,6 +1281,118 @@ async function toggleConfigAlerta(tipo, activo) {
     await api(`/config-alertas/${tipo}`, { method: 'PUT', body: JSON.stringify({ activo }) })
     toast(`Alerta ${tipo} ${activo ? 'activada' : 'desactivada'}`)
   } catch (err) { toast(err.message, 'error') }
+}
+
+async function actualizarEstadoBotConfig() {
+  const el = document.getElementById('config-bot-status')
+  const pasosEl = document.getElementById('config-bot-pasos')
+  try {
+    const bot = await api('/bot/diagnostico')
+    if (el) {
+      el.innerHTML = bot.conectado_socket
+        ? `<span class="status-dot on"></span>Conectado — envío <strong>activo</strong>${bot.usuario ? ` (${bot.usuario})` : ''}`
+        : `<span class="status-dot off"></span>Fase: <strong>${bot.fase || '—'}</strong> — ${bot.mensaje || 'Sin conexión'}`
+    }
+    const modoEl = document.getElementById('config-bot-modo')
+    if (modoEl) {
+      const m = bot.modo_vinculacion === 'pairing' ? 'Código (8 dígitos)' : 'QR (escaneo)'
+      const tel = bot.telefono_vinculacion_display
+        ? ` · Número del código: <strong>${bot.telefono_vinculacion_display}</strong>`
+        : ''
+      const cod = bot.codigo_vinculacion
+        ? ` · Código actual: <strong>${String(bot.codigo_vinculacion).replace(/(.{4})/, '$1-')}</strong>`
+        : ''
+      modoEl.innerHTML = `Modo activo: <strong>${m}</strong>${tel}${cod}`
+    }
+    if (pasosEl) {
+      const pasos = bot.pasos || []
+      if (!pasos.length) {
+        pasosEl.innerHTML = '<li style="color:var(--muted)">Sin pasos aún. Abre el visor QR (9300) o reinicia la vinculación.</li>'
+      } else {
+        pasosEl.innerHTML = pasos.map(p => `
+          <li style="padding:8px 0;border-bottom:1px solid var(--border)">
+            <span class="badge ${p.status === 'error' ? 'badge-off' : p.status === 'ok' ? 'badge-ok' : 'badge-warn'}">${p.status || '…'}</span>
+            <strong>${p.titulo}</strong> — ${p.detalle || ''}
+            <div style="color:var(--muted);font-size:0.75rem">${p.hora || ''}</div>
+          </li>`).join('')
+      }
+      if (bot.recomendacion) {
+        pasosEl.innerHTML += `<li style="padding:10px 0;color:var(--yellow)">💡 ${bot.recomendacion}</li>`
+      }
+      if (bot.ultimo_error) {
+        pasosEl.innerHTML += `<li style="padding:10px 0;color:var(--red)">⚠️ ${bot.ultimo_error}</li>`
+      }
+    }
+  } catch (err) {
+    if (el) el.textContent = err.message
+  }
+}
+
+async function vincularPorQrBot() {
+  if (!confirm('¿Iniciar vinculación por QR? Se borra cualquier código pendiente y se muestra QR en :9300.')) return
+  try {
+    toast('Preparando modo QR…')
+    const r = await api('/bot/vincular-qr', { method: 'POST', body: '{}' })
+    toast(r.mensaje || 'Abre http://localhost:9300')
+    setTimeout(actualizarEstadoBotConfig, 2000)
+    setTimeout(actualizarEstadoBotConfig, 8000)
+  } catch (err) {
+    toast(err.message, 'error')
+  }
+}
+
+async function vincularPorCodigoBot() {
+  const tel = document.getElementById('config-whatsapp-phone')?.value?.trim()
+  if (!tel) {
+    toast('Escribe el número WhatsApp (519XXXXXXXX) — debe coincidir con la SIM del teléfono', 'error')
+    return
+  }
+  if (!confirm(`¿Generar código para ${tel}? WhatsApp pedirá confirmar ese mismo número.`)) return
+  try {
+    toast('Generando código de 8 dígitos…')
+    const body = tel ? { telefono: tel } : {}
+    const r = await api('/bot/vincular-codigo', {
+      method: 'POST',
+      body: JSON.stringify(body)
+    })
+    toast(`Código: ${r.codigo} — también en puerto 9300`)
+    setTimeout(actualizarEstadoBotConfig, 1500)
+  } catch (err) {
+    toast(err.message, 'error')
+  }
+}
+
+async function pedirNuevoQrBot() {
+  if (!confirm('¿Generar un nuevo código QR? El anterior dejará de servir.')) return
+  try {
+    toast('Generando nuevo QR…')
+    const r = await api('/bot/nuevo-qr', { method: 'POST', body: '{}' })
+    toast(r.mensaje || 'Nuevo QR en puerto 9300')
+    setTimeout(actualizarEstadoBotConfig, 2000)
+    setTimeout(actualizarEstadoBotConfig, 8000)
+  } catch (err) {
+    toast(err.message, 'error')
+  }
+}
+
+async function reiniciarBotWhatsApp(nuevaVinculacion) {
+  if (nuevaVinculacion && !confirm(
+    '¿Borrar la sesión actual y generar un nuevo código QR? Deberás escanearlo en WhatsApp (puerto 9300).'
+  )) return
+
+  try {
+    toast(nuevaVinculacion ? 'Preparando nueva vinculación…' : 'Reconectando WhatsApp…')
+    const body = nuevaVinculacion
+      ? { nueva_vinculacion: true, confirmar: true }
+      : { nueva_vinculacion: false }
+    const r = await api('/bot/reiniciar', { method: 'POST', body: JSON.stringify(body) })
+    toast(r.mensaje || 'Operación iniciada')
+    setTimeout(actualizarEstadoBotConfig, 1500)
+    setTimeout(actualizarEstadoBotConfig, 4000)
+    setTimeout(actualizarEstadoBotConfig, 10000)
+  } catch (err) {
+    toast(err.message, 'error')
+  }
 }
 
 // ── Init ────────────────────────────────────────────────────

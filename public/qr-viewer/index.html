@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ZGroup Bot — Vincular WhatsApp</title>
+  <style>
+    * { box-sizing: border-box; }
+    :root {
+      --wa-bg: #f0f2f5;
+      --wa-cream: #f9f5f0;
+      --wa-green: #008069;
+      --wa-green-hover: #006c58;
+      --wa-text: #3b4a54;
+      --wa-muted: #667781;
+      --wa-border: #d1d7db;
+      --wa-card: #ffffff;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      background: var(--wa-cream);
+      color: var(--wa-text);
+      line-height: 1.45;
+    }
+    .page {
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 48px 24px 32px;
+    }
+    .brand {
+      text-align: center;
+      font-size: 0.85rem;
+      color: var(--wa-muted);
+      margin-bottom: 28px;
+    }
+    .link-card {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0;
+      background: var(--wa-card);
+      border: 1px solid var(--wa-border);
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 2px 12px rgba(11, 20, 26, 0.06);
+    }
+    @media (max-width: 768px) {
+      .link-card { grid-template-columns: 1fr; }
+      .link-right { order: -1; border-bottom: 1px solid var(--wa-border); }
+    }
+    .link-left {
+      padding: 40px 36px 36px;
+    }
+    .link-left h1 {
+      font-size: 1.65rem;
+      font-weight: 400;
+      color: #111b21;
+      margin: 0 0 28px;
+      line-height: 1.25;
+    }
+    .steps-wa {
+      list-style: none;
+      margin: 0 0 24px;
+      padding: 0;
+      counter-reset: step;
+    }
+    .steps-wa li {
+      position: relative;
+      padding-left: 36px;
+      margin-bottom: 20px;
+      font-size: 0.95rem;
+      color: var(--wa-text);
+    }
+    .steps-wa li::before {
+      counter-increment: step;
+      content: counter(step);
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 22px;
+      height: 22px;
+      border: 1px solid var(--wa-border);
+      border-radius: 50%;
+      font-size: 0.75rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--wa-muted);
+      background: #fff;
+    }
+    .steps-wa li:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      left: 10px;
+      top: 26px;
+      bottom: -14px;
+      width: 1px;
+      background: var(--wa-border);
+    }
+    .status-line {
+      font-size: 0.9rem;
+      color: var(--wa-muted);
+      margin: 0 0 16px;
+      min-height: 1.4em;
+    }
+    .wa-link {
+      color: var(--wa-green);
+      text-decoration: none;
+      font-size: 0.9rem;
+    }
+    .wa-link:hover { text-decoration: underline; }
+    .link-right {
+      background: #fafafa;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 32px 24px;
+      min-height: 360px;
+    }
+    /* Isla blanca: solo el QR, alto contraste, margen amplio para la cámara */
+    .qr-island {
+      background: #ffffff;
+      padding: 40px;
+      border: 1px solid var(--wa-border);
+      border-radius: 8px;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
+    }
+    .qr-island img {
+      display: block;
+      width: 264px;
+      height: 264px;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+    }
+    .qr-placeholder {
+      width: 264px;
+      height: 264px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      font-size: 0.85rem;
+      color: var(--wa-muted);
+      padding: 16px;
+    }
+    .qr-caption {
+      margin-top: 16px;
+      font-size: 0.8rem;
+      color: var(--wa-muted);
+      text-align: center;
+      max-width: 320px;
+    }
+    .success-box {
+      text-align: center;
+      padding: 24px;
+    }
+    .success-box .icon { font-size: 3rem; margin-bottom: 12px; }
+    .success-box h2 {
+      font-weight: 500;
+      color: var(--wa-green);
+      margin: 0 0 8px;
+    }
+    .notice {
+      margin-top: 12px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 0.85rem;
+    }
+    .notice.info {
+      background: #e7f8f3;
+      color: #005c4b;
+      border: 1px solid #b8e6d5;
+    }
+    .notice.warn {
+      background: #fff8e6;
+      color: #7a5c00;
+      border: 1px solid #f0d890;
+    }
+    .notice.err {
+      background: #fde8e8;
+      color: #9b1c1c;
+      border: 1px solid #f5c2c2;
+    }
+    .hidden { display: none !important; }
+    .diag-panel {
+      margin-top: 28px;
+      background: var(--wa-card);
+      border: 1px solid var(--wa-border);
+      border-radius: 8px;
+      padding: 0 16px 12px;
+    }
+    .diag-panel summary {
+      cursor: pointer;
+      padding: 14px 0;
+      color: var(--wa-muted);
+      font-size: 0.85rem;
+      user-select: none;
+    }
+    .diag-panel .steps { list-style: none; padding: 0; margin: 0; }
+    .diag-panel .steps li {
+      display: flex;
+      gap: 10px;
+      padding: 8px 0;
+      border-top: 1px solid #eee;
+      font-size: 0.8rem;
+    }
+    .dot {
+      width: 20px; height: 20px; border-radius: 50%; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 600;
+    }
+    .dot.ok { background: #d1fae5; color: #065f46; }
+    .dot.pending { background: #e2e8f0; color: #64748b; }
+    .dot.error { background: #fee2e2; color: #991b1b; }
+    .dot.warn { background: #fef3c7; color: #92400e; }
+    .page-footer {
+      text-align: center;
+      margin-top: 32px;
+      font-size: 0.75rem;
+      color: var(--wa-muted);
+    }
+    .page-footer a { color: var(--wa-green); }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <p class="brand">ZGroup Bot · vinculación WhatsApp</p>
+
+    <div class="link-card">
+      <div class="link-left">
+        <h1 id="titulo-principal">Escanea para vincular el bot</h1>
+        <ol class="steps-wa" id="steps-wa">
+          <li>Abre <strong>WhatsApp</strong> en tu teléfono.</li>
+          <li>Menú ⋮ → <strong>Dispositivos vinculados</strong> → <strong>Vincular dispositivo</strong>.</li>
+          <li id="step-wa-3">Apunta la cámara <strong>solo al recuadro blanco</strong> del QR (derecha).</li>
+        </ol>
+        <p class="status-line" id="modo-activo" style="font-size:0.85rem;color:#008069;margin-bottom:8px"></p>
+        <p class="status-line" id="mensaje">Cargando…</p>
+        <p style="font-size:0.82rem;color:#667781">
+          Cambiar método: panel admin (9301) → <strong>Iniciar vinculación QR</strong> o <strong>por código</strong>.
+        </p>
+        <p>
+          <a class="wa-link" id="link-qr-solo" href="./qr-scan.html" target="_blank" rel="noopener">
+            Abrir pantalla solo QR ↗
+          </a>
+        </p>
+        <div id="alert-box" class="hidden"></div>
+        <div id="err-box" class="hidden"></div>
+      </div>
+
+      <div class="link-right">
+        <div id="qr-scan-area">
+          <div class="qr-island" id="qr-island">
+            <div class="qr-placeholder" id="qr-placeholder">Generando código QR…</div>
+            <img id="qr-img" class="hidden" alt="Código QR WhatsApp">
+          </div>
+          <p class="qr-caption" id="qr-caption">
+            Mismo código ~2 minutos. Admin → Pedir nuevo QR si expira.
+          </p>
+        </div>
+        <div id="pairing-area" class="hidden" style="text-align:center;padding:16px">
+          <p style="color:#008069;font-size:0.95rem;font-weight:600;margin:0 0 8px" id="pairing-phone">Número: —</p>
+          <p style="color:#667781;font-size:0.85rem;margin:0 0 12px">Este código solo vale para ese número en WhatsApp.</p>
+          <p style="color:#667781;font-size:0.9rem;margin:0 0 12px">Introduce el código en el teléfono:</p>
+          <p id="pairing-code" style="font-size:2.5rem;font-weight:600;letter-spacing:0.35em;color:#111b21;margin:0 0 12px">——</p>
+          <p style="color:#667781;font-size:0.85rem;margin:0">Dispositivos vinculados → Vincular → Vincular con número de teléfono</p>
+        </div>
+        <div id="success-area" class="success-box hidden">
+          <div class="icon">✓</div>
+          <h2>WhatsApp vinculado</h2>
+          <p style="color:var(--wa-muted);font-size:0.9rem;margin:0">El bot ya puede enviar alertas.</p>
+        </div>
+      </div>
+    </div>
+
+    <details class="diag-panel">
+      <summary>Diagnóstico técnico (actualiza cada 3 s)</summary>
+      <p style="font-size:0.75rem;color:var(--wa-muted);margin:8px 0">
+        Fase: <strong id="fase-badge">—</strong> · Última actualización: <span id="ts">—</span>
+      </p>
+      <ul id="steps" class="steps"></ul>
+    </details>
+
+    <p class="page-footer">
+      Panel de administración: <a href="http://localhost:9301/admin" target="_blank" rel="noopener">localhost:9301</a>
+      · <a href="./status.json" target="_blank">status.json</a>
+    </p>
+  </div>
+
+  <script>
+    const icon = { ok: '✓', pending: '…', error: '!', warn: '!' }
+
+    function formatPairingCode(c) {
+      if (!c) return '——'
+      const s = String(c).replace(/-/g, '')
+      return s.length > 4 ? s.slice(0, 4) + '-' + s.slice(4) : s
+    }
+
+    function mostrarQr(imgSrc) {
+      const img = document.getElementById('qr-img')
+      const ph = document.getElementById('qr-placeholder')
+      img.src = imgSrc
+      img.classList.remove('hidden')
+      ph.classList.add('hidden')
+      document.getElementById('qr-scan-area').classList.remove('hidden')
+      document.getElementById('success-area').classList.add('hidden')
+    }
+
+    function ocultarQr(mensaje) {
+      const img = document.getElementById('qr-img')
+      const ph = document.getElementById('qr-placeholder')
+      img.classList.add('hidden')
+      img.removeAttribute('src')
+      ph.classList.remove('hidden')
+      ph.textContent = mensaje || 'Generando código QR…'
+    }
+
+    async function cargar() {
+      try {
+        const res = await fetch('./status.json?t=' + Date.now())
+        if (!res.ok) throw new Error('status.json no disponible (¿bot en marcha?)')
+        const s = await res.json()
+
+        document.getElementById('fase-badge').textContent = s.fase || '—'
+        document.getElementById('mensaje').textContent = s.mensaje || '—'
+        document.getElementById('ts').textContent = s.actualizado
+          ? new Date(s.actualizado).toLocaleString('es-PE')
+          : '—'
+
+        const titulo = document.getElementById('titulo-principal')
+        const tieneQr = s.qr_imagen && (s.qr_disponible || s.fase === 'qr_listo')
+        const enModoCodigo =
+          s.modo_vinculacion === 'pairing' ||
+          ((s.codigo_vinculacion || s.fase === 'pairing_listo') && s.modo_vinculacion !== 'qr')
+
+        const modoEl = document.getElementById('modo-activo')
+        const step3 = document.getElementById('step-wa-3')
+        const linkQrSolo = document.getElementById('link-qr-solo')
+        if (modoEl) {
+          modoEl.textContent = enModoCodigo
+            ? 'Modo: código de 8 dígitos (no uses la cámara para esto)'
+            : 'Modo: escaneo QR'
+        }
+        if (step3) {
+          step3.innerHTML = enModoCodigo
+            ? 'Elige <strong>Vincular con número de teléfono</strong> e ingresa el código de la derecha.'
+            : 'Apunta la cámara <strong>solo al recuadro blanco</strong> del QR (derecha).'
+        }
+        if (linkQrSolo) {
+          linkQrSolo.style.display = enModoCodigo ? 'none' : ''
+        }
+
+        if (s.conectado) {
+          titulo.textContent = 'Sesión activa'
+          document.getElementById('qr-scan-area').classList.add('hidden')
+          document.getElementById('pairing-area').classList.add('hidden')
+          document.getElementById('success-area').classList.remove('hidden')
+        } else if (enModoCodigo && (s.codigo_vinculacion || s.fase === 'pairing_listo')) {
+          titulo.textContent = 'Vincular con código de 8 dígitos'
+          document.getElementById('success-area').classList.add('hidden')
+          document.getElementById('qr-scan-area').classList.add('hidden')
+          const pa = document.getElementById('pairing-area')
+          pa.classList.remove('hidden')
+          document.getElementById('pairing-code').textContent = formatPairingCode(s.codigo_vinculacion)
+          const telEl = document.getElementById('pairing-phone')
+          if (telEl) {
+            telEl.textContent = s.telefono_vinculacion_display
+              ? 'Número WhatsApp: ' + s.telefono_vinculacion_display
+              : 'Confirma en admin el mismo número que la SIM del teléfono'
+          }
+        } else if (tieneQr || s.modo_vinculacion === 'qr') {
+          document.getElementById('pairing-area').classList.add('hidden')
+          document.getElementById('success-area').classList.add('hidden')
+          titulo.textContent = 'Escanea para vincular el bot'
+          document.getElementById('qr-scan-area').classList.remove('hidden')
+          if (tieneQr) {
+            mostrarQr(s.qr_imagen)
+          } else {
+            ocultarQr('Generando QR…')
+          }
+          document.getElementById('qr-caption').textContent =
+            'Modo QR. Si prefieres código: admin → Iniciar vinculación por código.'
+        } else if (s.vinculacion_en_curso || s.fase === 'vinculando') {
+          titulo.textContent = 'Completando vinculación…'
+          document.getElementById('success-area').classList.add('hidden')
+          document.getElementById('pairing-area').classList.add('hidden')
+          document.getElementById('qr-scan-area').classList.remove('hidden')
+          ocultarQr('QR aceptado — no escanear otro código')
+          document.getElementById('qr-caption').textContent =
+            'Activando sesión. Esto puede tardar unos segundos.'
+        } else if (s.fase === 'conectando' && s.mensaje && s.mensaje.includes('Activando')) {
+          document.getElementById('pairing-area').classList.add('hidden')
+          titulo.textContent = 'Completando vinculación…'
+          document.getElementById('qr-scan-area').classList.remove('hidden')
+          ocultarQr('Activando sesión…')
+        } else {
+          document.getElementById('pairing-area').classList.add('hidden')
+          titulo.textContent = 'Preparando vinculación'
+          document.getElementById('qr-scan-area').classList.remove('hidden')
+          ocultarQr('Elige en admin: Iniciar QR o Iniciar por código')
+        }
+
+        const alertBox = document.getElementById('alert-box')
+        if (s.recomendacion) {
+          alertBox.className = 'notice info'
+          alertBox.textContent = s.recomendacion
+        } else alertBox.className = 'hidden'
+
+        const errBox = document.getElementById('err-box')
+        const esReinicioTrasQr = s.codigo_desconexion === 515
+        if (s.ultimo_error && !esReinicioTrasQr) {
+          errBox.className = 'notice err'
+          errBox.textContent = s.ultimo_error +
+            (s.codigo_desconexion != null ? ' (código ' + s.codigo_desconexion + ')' : '')
+        } else errBox.className = 'hidden'
+
+        const ul = document.getElementById('steps')
+        const pasos = s.pasos || []
+        if (!pasos.length) {
+          ul.innerHTML = '<li><span style="color:var(--wa-muted)">Esperando al bot…</span></li>'
+        } else {
+          ul.innerHTML = pasos.map(p => `
+            <li>
+              <div class="dot ${p.status || 'pending'}">${icon[p.status] || '…'}</div>
+              <div>
+                <strong>${p.titulo}</strong> — ${p.detalle || ''}
+                <div style="color:var(--wa-muted);font-size:0.72rem">${p.hora || ''}</div>
+              </div>
+            </li>`).join('')
+        }
+      } catch (e) {
+        document.getElementById('mensaje').textContent = e.message
+        ocultarQr('Sin conexión con el bot')
+        document.getElementById('err-box').className = 'notice err'
+        document.getElementById('err-box').textContent =
+          'Verifica que zgroup-bot esté corriendo y el volumen ./qr montado.'
+      }
+    }
+
+    cargar()
+    setInterval(cargar, 3000)
+  </script>
+</body>
+</html>

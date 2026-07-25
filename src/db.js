@@ -245,6 +245,7 @@ const db = {
 
     const imeis = [...dispositivosMap.values()].map(d => d.imei)
     const alertasMap = {}
+    const fueraDeRangoSet = new Set()
     if (imeis.length) {
       const { rows } = await pool.query(`
         SELECT equipo_id, COUNT(*)::int AS cnt
@@ -252,12 +253,19 @@ const db = {
         GROUP BY equipo_id
       `, [imeis])
       rows.forEach(r => { alertasMap[r.equipo_id] = r.cnt })
+
+      const { rows: fueraRows } = await pool.query(`
+        SELECT DISTINCT equipo_id FROM alertas
+        WHERE resuelta = false AND codigo = 'fuera_de_rango' AND equipo_id = ANY($1)
+      `, [imeis])
+      fueraRows.forEach(r => fueraDeRangoSet.add(r.equipo_id))
     }
 
     const dispositivos = [...dispositivosMap.values()].map(v => {
       const pendientes = alertasMap[v.imei] || 0
-      const fueraRango = v.en_rango === false
-      const tieneAlarma = pendientes > 0 || fueraRango
+      const fueraRango = v.en_rango === false || fueraDeRangoSet.has(v.imei)
+      const tieneAlarma = pendientes > 0 || v.en_rango === false
+      const link1 = (v.link_origen || 'link1') === 'link1'
       return {
         id: v.id,
         imei: v.imei,
@@ -269,6 +277,7 @@ const db = {
         alertas_pendientes: pendientes,
         tiene_alerta: tieneAlarma,
         fuera_rango: fueraRango,
+        elegible_analisis_12h: link1 && fueraRango,
         grupos: [...v.grupos],
         usuario_ids: [...v.usuario_ids],
         usuarios: [...v.usuario_nombres]
@@ -442,14 +451,14 @@ const db = {
   async actualizarConfigApi(data) {
     const { rows } = await pool.query(`
       UPDATE config_api SET
-        url = COALESCE($2, url),
-        online_hasta_horas = COALESCE($3, online_hasta_horas),
-        wait_hasta_horas = COALESCE($4, wait_hasta_horas),
-        alerta_online = COALESCE($5, alerta_online),
-        alerta_wait = COALESCE($6, alerta_wait),
-        alerta_offline = COALESCE($7, alerta_offline),
-        intervalo_minutos = COALESCE($8, intervalo_minutos),
-        url_live = COALESCE($9, url_live),
+        url = COALESCE($1, url),
+        online_hasta_horas = COALESCE($2, online_hasta_horas),
+        wait_hasta_horas = COALESCE($3, wait_hasta_horas),
+        alerta_online = COALESCE($4, alerta_online),
+        alerta_wait = COALESCE($5, alerta_wait),
+        alerta_offline = COALESCE($6, alerta_offline),
+        intervalo_minutos = COALESCE($7, intervalo_minutos),
+        url_live = COALESCE($8, url_live),
         actualizado_en = NOW()
       WHERE id = 1 RETURNING *
     `, [
@@ -457,6 +466,43 @@ const db = {
       data.alerta_online, data.alerta_wait, data.alerta_offline, data.intervalo_minutos,
       data.url_live
     ])
+    return rows[0]
+  },
+
+  async listarConfigLinks() {
+    const { rows } = await pool.query(
+      'SELECT * FROM config_links ORDER BY link_id'
+    )
+    return rows
+  },
+
+  async listarConfigLinksActivos() {
+    const { rows } = await pool.query(
+      'SELECT * FROM config_links WHERE activo = true ORDER BY link_id'
+    )
+    return rows
+  },
+
+  async obtenerConfigLink(link_id) {
+    const { rows } = await pool.query(
+      'SELECT * FROM config_links WHERE link_id = $1',
+      [link_id]
+    )
+    return rows[0] || null
+  },
+
+  async actualizarConfigLink(link_id, data) {
+    const { rows } = await pool.query(`
+      UPDATE config_links SET
+        nombre = COALESCE($2, nombre),
+        url_reporte = COALESCE($3, url_reporte),
+        url_live = COALESCE($4, url_live),
+        url_historico = COALESCE($5, url_historico),
+        tipo_default = COALESCE($6, tipo_default),
+        activo = COALESCE($7, activo),
+        actualizado_en = NOW()
+      WHERE link_id = $1 RETURNING *
+    `, [link_id, data.nombre, data.url_reporte, data.url_live, data.url_historico, data.tipo_default, data.activo])
     return rows[0]
   },
 
@@ -588,6 +634,47 @@ const db = {
     ])
     if (rows[0]) await this.asegurarEquipoDesdeDispositivo(rows[0])
     return rows[0]
+  },
+
+  async obtenerProcesoCa(dispositivo_id) {
+    const { rows } = await pool.query(
+      'SELECT * FROM proceso_ca WHERE dispositivo_id = $1',
+      [dispositivo_id]
+    )
+    return rows[0] || null
+  },
+
+  async guardarProcesoCa(dispositivo_id, data) {
+    const { rows } = await pool.query(`
+      INSERT INTO proceso_ca (
+        dispositivo_id, receta, tipo_fruta, variacion, procedencia,
+        fecha_inicio, fecha_fin, maquina_serie, actualizado_en
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+      ON CONFLICT (dispositivo_id) DO UPDATE SET
+        receta = EXCLUDED.receta,
+        tipo_fruta = EXCLUDED.tipo_fruta,
+        variacion = EXCLUDED.variacion,
+        procedencia = EXCLUDED.procedencia,
+        fecha_inicio = EXCLUDED.fecha_inicio,
+        fecha_fin = EXCLUDED.fecha_fin,
+        maquina_serie = EXCLUDED.maquina_serie,
+        actualizado_en = NOW()
+      RETURNING *
+    `, [
+      dispositivo_id,
+      data.receta,
+      data.tipo_fruta,
+      data.variacion,
+      data.procedencia,
+      data.fecha_inicio,
+      data.fecha_fin,
+      data.maquina_serie
+    ])
+    return rows[0]
+  },
+
+  async eliminarProcesoCa(dispositivo_id) {
+    await pool.query('DELETE FROM proceso_ca WHERE dispositivo_id = $1', [dispositivo_id])
   },
 
   async actualizarTelemetria(id, t) {

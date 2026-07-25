@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Escanear QR — ZGroup Bot</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      min-height: 100vh;
+      background: #f9f5f0;
+      font-family: "Segoe UI", system-ui, sans-serif;
+    }
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 32px 20px;
+    }
+    .hint {
+      font-size: 0.8rem;
+      color: #667781;
+      text-align: center;
+      max-width: 360px;
+      margin-bottom: 20px;
+      line-height: 1.4;
+    }
+    .qr-only {
+      background: #ffffff;
+      padding: 48px;
+      border: 1px solid #d1d7db;
+      border-radius: 4px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    }
+    .qr-only img {
+      display: block;
+      width: min(300px, 78vw);
+      height: min(300px, 78vw);
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+    }
+    .wait {
+      width: min(300px, 78vw);
+      height: min(300px, 78vw);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      color: #667781;
+      font-size: 0.9rem;
+      padding: 20px;
+    }
+    .back {
+      margin-top: 24px;
+      color: #008069;
+      font-size: 0.85rem;
+      text-decoration: none;
+    }
+    .back:hover { text-decoration: underline; }
+    .ok {
+      text-align: center;
+      color: #008069;
+      font-size: 1.1rem;
+      padding: 40px;
+    }
+  </style>
+</head>
+<body>
+  <p class="hint">
+    Pantalla mínima para la cámara de WhatsApp. Enfoca solo el cuadrado blanco.
+  </p>
+  <div class="qr-only" id="box">
+    <div class="wait" id="wait">Generando QR…</div>
+    <img id="qr" class="hidden" alt="QR WhatsApp">
+  </div>
+  <div id="done" class="ok hidden">✓ Vinculado — puedes cerrar esta ventana</div>
+  <a class="back" href="./">← Volver a instrucciones</a>
+
+  <script>
+    async function tick() {
+      try {
+        const res = await fetch('./status.json?t=' + Date.now())
+        if (!res.ok) return
+        const s = await res.json()
+        const wait = document.getElementById('wait')
+        const img = document.getElementById('qr')
+        const box = document.getElementById('box')
+        const done = document.getElementById('done')
+
+        if (s.conectado) {
+          box.classList.add('hidden')
+          done.classList.remove('hidden')
+          return
+        }
+        if (s.vinculacion_en_curso || s.fase === 'vinculando') {
+          box.classList.remove('hidden')
+          done.classList.add('hidden')
+          wait.classList.remove('hidden')
+          img.classList.add('hidden')
+          wait.textContent = 'Vinculando — no escanear otro QR…'
+          return
+        }
+        if (s.qr_imagen && (s.qr_disponible || s.fase === 'qr_listo')) {
+          if (img.src !== s.qr_imagen) img.src = s.qr_imagen
+          wait.classList.add('hidden')
+          img.classList.remove('hidden')
+        } else if (s.fase === 'conectando' && String(s.mensaje || '').includes('Activando')) {
+          wait.textContent = 'Activando sesión…'
+        } else {
+          wait.classList.remove('hidden')
+          img.classList.add('hidden')
+          wait.textContent = 'Esperando código QR…'
+        }
+      } catch { /* retry */ }
+    }
+    tick()
+    setInterval(tick, 2000)
+  </script>
+</body>
+</html>

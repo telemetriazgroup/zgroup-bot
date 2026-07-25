@@ -1,6 +1,6 @@
 FROM node:20-alpine
 
-# Dependencias del sistema para Baileys
+# Chromium para whatsapp-web.js (mismo canal que WhatsApp Web)
 RUN apk add --no-cache \
     chromium \
     nss \
@@ -8,33 +8,36 @@ RUN apk add --no-cache \
     harfbuzz \
     ca-certificates \
     ttf-freefont \
+    udev \
+    ttf-opensans \
     python3 \
     make \
     g++ \
     git \
     su-exec
 
+ENV PUPPETEER_SKIP_DOWNLOAD=true \
+    PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser \
+    CHROME_PATH=/usr/bin/chromium-browser \
+    WHATSAPP_CLIENT=wwebjs
+
 WORKDIR /app
 
-# Copiar dependencias primero (mejor cache)
 COPY package*.json ./
-RUN npm ci --omit=dev
+RUN npm install --omit=dev
 
-# Copiar código fuente
 COPY src/ ./src/
-COPY index.js ./
 COPY public/ ./public/
+COPY index.js ./
 
-# Carpeta de sesión persistente (se montará como volumen)
-RUN mkdir -p /app/sessions && chmod 777 /app/sessions
+RUN mkdir -p /app/sessions /app/qr /app/logs && chmod 777 /app/sessions
 
-# Puerto de la API REST
 EXPOSE 9301
 
 COPY docker-entrypoint.sh ./
 RUN chmod +x docker-entrypoint.sh
 
-# Usuario no-root por seguridad (entrypoint ajusta permisos de volúmenes)
 RUN addgroup -S botuser && adduser -S botuser -G botuser
 RUN chown -R botuser:botuser /app
 

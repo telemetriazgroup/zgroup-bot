@@ -2,6 +2,8 @@ const { getSock } = require('../bot')
 const { db } = require('../db')
 const { logger } = require('../logger')
 const { fetchLiveData, extraerTelemetria, SENSORES } = require('./live')
+const { analizarYGenerarGrafica } = require('./historico')
+const { formatearSeguimientoProceso } = require('./informe-ca')
 
 const DELTA_DEFAULT = 5
 const DELAY_MS = 2000
@@ -21,7 +23,7 @@ async function enriquecerDispositivo(disp) {
   let d = { ...disp }
   if (d.estado_conexion === 'online') {
     try {
-      const live = await fetchLiveData(d.imei)
+      const live = await fetchLiveData(d.imei, d.link_origen)
       const telem = extraerTelemetria(live.ultimo)
       d = { ...d, ...telem, telemetria_actualizada: new Date() }
       await db.actualizarTelemetria(d.id, telem)
@@ -30,8 +32,58 @@ async function enriquecerDispositivo(disp) {
     }
   }
   d.alertas_pendientes = await db.obtenerAlertasPendientesPorImei(d.imei)
-  d.tiene_alerta = d.alertas_pendientes.length > 0
+  d.tiene_alerta = d.alertas_pendientes.length > 0 || d.en_rango === false
+  d.rango = calcularRango(d)
+  d.proceso_ca = await db.obtenerProcesoCa(d.id)
   return d
+}
+
+function calcularRango(d) {
+  const delta = d.delta != null ? parseFloat(d.delta) : DELTA_DEFAULT
+  const setRef = d.set_control != null ? parseFloat(d.set_control) : d.set_point_live
+  const sensorKey = d.sensor_control || 'return_air'
+  const sensorVal = d[sensorKey] ?? d.return_air
+  const sensorNombre = SENSORES[sensorKey] || sensorKey
+  if (setRef == null || sensorVal == null) return { fueraDeRango: d.en_rango === false, setRef, delta, sensorVal, sensorNombre }
+
+  const min = setRef - delta
+  const max = setRef + delta
+  const fueraLive = sensorVal < min || sensorVal > max
+  const alertaFuera = d.alertas_pendientes?.some(a => a.codigo === 'fuera_de_rango')
+  return {
+    fueraDeRango: d.en_rango === false || alertaFuera || fueraLive,
+    setRef, delta, min, max, sensorVal, sensorNombre, alertaFuera
+  }
+}
+
+function formatearBloqueAnalisis12h(d, analisis) {
+  if (!analisis) return ''
+  const r = d.rango || {}
+  let bloque = ''
+  if (analisis.mensajeHoras) bloque += `\n🔴 *${analisis.mensajeHoras}*\n`
+  if (r.sensorNombre && r.sensorVal != null && r.setRef != null) {
+    bloque += `📋 ${r.sensorNombre}: ${r.sensorVal}°C | Rango: ${r.min}°C a ${r.max}°C (Set ${r.setRef}°C ±${r.delta})\n`
+  }
+  if (analisis.horasEnteras >= 2) {
+    bloque += `📊 Análisis 12h: ${analisis.horasEnteras}h continuas fuera de rango (${analisis.totalFuera}/${analisis.totalRegistros} lecturas)\n`
+  } else if (analisis.totalRegistros) {
+    bloque += `📊 Análisis 12h: ${analisis.totalRegistros} lecturas revisadas\n`
+  }
+  return bloque
+}
+
+function formatearCaptionAnalisis12h(d, grupoNombre, analisis) {
+  const nombre = d.nombre || d.imei
+  const bloque = formatearBloqueAnalisis12h(d, analisis)
+  return (
+    `🚨 *ANÁLISIS FUERA DE RANGO — 12h*\n\n` +
+    `📁 Grupo: *${grupoNombre}*\n` +
+    `📦 ${nombre}\n` +
+    `🔢 IMEI: ${d.imei}\n` +
+    bloque +
+    `\n📈 Trazabilidad últimas 12 horas\n` +
+    `🕐 ${fmtFecha(new Date())}`
+  )
 }
 
 function formatearControl(d) {
@@ -71,6 +123,8 @@ function formatearMensajeDispositivo(d, grupoNombre) {
   const estadoEmoji = { online: '🟢', wait: '🟡', offline: '🔴' }
   const emoji = estadoEmoji[d.estado_conexion] || '⚪'
   const link = d.link_origen || 'link1'
+  const analisisTxt = d.analisis_12h ? formatearBloqueAnalisis12h(d, d.analisis_12h) : ''
+  const fueraTxt = d.rango?.fueraDeRango ? `\n⚠️ *Estado: FUERA DE RANGO*\n` : ''
   return (
     `📊 *ESTADO DISPOSITIVO — ZGroup*\n\n` +
     `📁 Grupo: *${grupoNombre}*\n` +
@@ -78,9 +132,13 @@ function formatearMensajeDispositivo(d, grupoNombre) {
     `📦 ${d.nombre || d.imei}\n` +
     `🔢 IMEI: ${d.imei}\n` +
     `${emoji} Conexión: *${(d.estado_conexion || 'unknown').toUpperCase()}*\n` +
-    `📍 IP: ${d.last_ip || 'N/A'}\n\n` +
-    `${formatearTelemetria(d)}\n\n` +
+    `📍 IP: ${d.last_ip || 'N/A'}\n` +
+    fueraTxt +
+    analisisTxt +
+    `\n` +
     `${formatearControl(d)}\n\n` +
+    `${formatearSeguimientoProceso(d.proceso_ca)}` +
+    `${formatearTelemetria(d)}\n\n` +
     `${formatearAlertas(d)}\n\n` +
     `🕐 ${fmtFecha(new Date())}`
   )
@@ -115,7 +173,16 @@ function formatearResumenGrupo(grupoNombre, dispositivos) {
   )
 }
 
-async function procesarGrupo(sock, telefono, grupoNombre, dispositivos) {
+async function enviarAnalisis12h(sock, telefono, d, grupoNombre, imagen) {
+  if (!imagen) return 0
+  await sleep(DELAY_MS)
+  const caption = formatearCaptionAnalisis12h(d, grupoNombre, d.analisis_12h)
+  await sock.sendMessage(`${telefono}@s.whatsapp.net`, { image: imagen, caption })
+  logger.info(`📈 Gráfica 12h enviada → ${telefono} | ${d.imei}`)
+  return 1
+}
+
+async function procesarGrupo(sock, telefono, grupoNombre, dispositivos, { incluirAnalisis12h = false } = {}) {
   let enviados = 0
   const enriquecidos = []
   for (const d of dispositivos) {
@@ -123,11 +190,27 @@ async function procesarGrupo(sock, telefono, grupoNombre, dispositivos) {
   }
 
   for (let i = 0; i < enriquecidos.length; i++) {
+    const d = enriquecidos[i]
+    let imagen12h = null
+
+    if (incluirAnalisis12h && d.rango?.fueraDeRango && (d.link_origen || 'link1') === 'link1') {
+      const { analisis, imagen } = await analizarYGenerarGrafica(d, {
+        setRef: d.rango.setRef,
+        delta: d.rango.delta
+      })
+      d.analisis_12h = analisis
+      imagen12h = imagen
+    }
+
     if (i > 0) await sleep(DELAY_MS)
-    const msg = formatearMensajeDispositivo(enriquecidos[i], grupoNombre)
+    const msg = formatearMensajeDispositivo(d, grupoNombre)
     await sock.sendMessage(`${telefono}@s.whatsapp.net`, { text: msg })
     enviados++
-    logger.info(`📊 Estado enviado → ${telefono} | ${grupoNombre} | ${enriquecidos[i].imei}`)
+    logger.info(`📊 Estado enviado → ${telefono} | ${grupoNombre} | ${d.imei}`)
+
+    if (imagen12h) {
+      enviados += await enviarAnalisis12h(sock, telefono, d, grupoNombre, imagen12h)
+    }
   }
 
   if (enriquecidos.length > 1) {
@@ -141,7 +224,7 @@ async function procesarGrupo(sock, telefono, grupoNombre, dispositivos) {
   return enviados
 }
 
-async function enviarTestEstadoUsuario(usuarioId, dispositivoIds = null) {
+async function enviarTestEstadoUsuario(usuarioId, dispositivoIds = null, { incluirAnalisis12h = false } = {}) {
   const usuario = await db.obtenerUsuarioPorId(usuarioId)
   if (!usuario) throw new Error('Usuario no encontrado')
   if (!usuario.activo) throw new Error(`Usuario ${usuario.nombre} está inactivo`)
@@ -168,21 +251,21 @@ async function enviarTestEstadoUsuario(usuarioId, dispositivoIds = null) {
   let enviados = 0
   for (const g of grupos) {
     if (g.dispositivos.length) {
-      enviados += await procesarGrupo(sock, usuario.telefono, g.nombre, g.dispositivos)
+      enviados += await procesarGrupo(sock, usuario.telefono, g.nombre, g.dispositivos, { incluirAnalisis12h })
     }
   }
   if (individuales.length) {
-    enviados += await procesarGrupo(sock, usuario.telefono, 'Asignación individual', individuales)
+    enviados += await procesarGrupo(sock, usuario.telefono, 'Asignación individual', individuales, { incluirAnalisis12h })
   }
 
-  return { enviados, usuario: usuario.nombre, telefono: usuario.telefono, dispositivos: totalDisp }
+  return { enviados, usuario: usuario.nombre, telefono: usuario.telefono, dispositivos: totalDisp, incluir_analisis_12h: incluirAnalisis12h }
 }
 
-async function enviarTestEstadoMultiples(usuarioIds, dispositivoIds = null) {
+async function enviarTestEstadoMultiples(usuarioIds, dispositivoIds = null, { incluirAnalisis12h = false } = {}) {
   const resultados = []
   for (const id of usuarioIds) {
     try {
-      const r = await enviarTestEstadoUsuario(id, dispositivoIds)
+      const r = await enviarTestEstadoUsuario(id, dispositivoIds, { incluirAnalisis12h })
       resultados.push({ usuario_id: id, ...r })
       if (usuarioIds.indexOf(id) < usuarioIds.length - 1) await sleep(DELAY_MS)
     } catch (err) {
