@@ -58,9 +58,6 @@ INSERT INTO config_alertas (tipo, descripcion, nivel) VALUES
   ('cambio_setpoint', 'Cambio de setpoint detectado', 'normal')
 ON CONFLICT (tipo) DO NOTHING;
 
-ALTER TABLE alertas ADD COLUMN IF NOT EXISTS codigo VARCHAR(50);
-ALTER TABLE alertas ALTER COLUMN tipo TYPE TEXT;
-
 ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS set_control NUMERIC(5,2);
 ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS delta NUMERIC(5,2);
 ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS sensor_control VARCHAR(30) DEFAULT 'return_air';
@@ -76,13 +73,26 @@ ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS telemetria_actualizada TIMESTA
 ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS link_origen VARCHAR(20) DEFAULT 'link1';
 ALTER TABLE config_api ADD COLUMN IF NOT EXISTS url_live VARCHAR(500) DEFAULT 'http://161.132.53.51:9050/Tunel/decodificado/live/';
 ALTER TABLE config_api ADD COLUMN IF NOT EXISTS link_id VARCHAR(20) DEFAULT 'link1';
-ALTER TABLE config_links ADD COLUMN IF NOT EXISTS url_historico VARCHAR(500);
 
-ALTER TABLE equipos ADD COLUMN IF NOT EXISTS imei VARCHAR(20);
-ALTER TABLE equipos ADD COLUMN IF NOT EXISTS alarmas_activas BOOLEAN NOT NULL DEFAULT true;
+-- equipos/alertas pueden no existir en DBs muy antiguas
+DO $$ BEGIN
+  ALTER TABLE equipos ADD COLUMN IF NOT EXISTS imei VARCHAR(20);
+  ALTER TABLE equipos ADD COLUMN IF NOT EXISTS alarmas_activas BOOLEAN NOT NULL DEFAULT true;
+EXCEPTION WHEN undefined_table THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  ALTER TABLE alertas ADD COLUMN IF NOT EXISTS codigo VARCHAR(50);
+  ALTER TABLE alertas ALTER COLUMN tipo TYPE TEXT;
+EXCEPTION WHEN undefined_table THEN NULL;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_dispositivos_estado ON dispositivos(estado_conexion);
-CREATE INDEX IF NOT EXISTS idx_alertas_resuelta ON alertas(resuelta);
+
+DO $$ BEGIN
+  CREATE INDEX IF NOT EXISTS idx_alertas_resuelta ON alertas(resuelta);
+EXCEPTION WHEN undefined_table THEN NULL;
+END $$;
 
 -- Grupos de alertas
 CREATE TABLE IF NOT EXISTS grupos_alertas (
@@ -111,7 +121,7 @@ CREATE TABLE IF NOT EXISTS usuario_dispositivos (
   PRIMARY KEY (usuario_id, dispositivo_id)
 );
 
--- Links de API (Tunel, TermoKing, etc.)
+-- Links de API (crear ANTES de cualquier ALTER sobre esta tabla)
 CREATE TABLE IF NOT EXISTS config_links (
   id            SERIAL PRIMARY KEY,
   link_id       VARCHAR(20)  NOT NULL UNIQUE,
@@ -123,6 +133,8 @@ CREATE TABLE IF NOT EXISTS config_links (
   activo        BOOLEAN      NOT NULL DEFAULT true,
   actualizado_en TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE config_links ADD COLUMN IF NOT EXISTS url_historico VARCHAR(500);
 
 INSERT INTO config_links (link_id, nombre, url_reporte, url_live, url_historico, tipo_default) VALUES
   ('link1', 'Tunel',
