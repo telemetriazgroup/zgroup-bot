@@ -165,3 +165,143 @@ CREATE TABLE IF NOT EXISTS proceso_ca (
   actualizado_en  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Activación conversacional: 3 respuestas antes de recibir alertas push
+ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS alertas_habilitadas BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS prueba_respuestas INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS prueba_iniciada_en TIMESTAMPTZ;
+ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS prueba_completada_en TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS conversacion_eventos (
+  id          SERIAL PRIMARY KEY,
+  usuario_id  INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+  tipo        VARCHAR(50)  NOT NULL,
+  detalle     TEXT,
+  meta        JSONB,
+  creado_en   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversacion_eventos_usuario
+  ON conversacion_eventos (usuario_id, creado_en DESC);
+CREATE INDEX IF NOT EXISTS idx_conversacion_eventos_tipo
+  ON conversacion_eventos (tipo, creado_en DESC);
+
+-- Historial completo de mensajes WhatsApp (contexto + auditoría)
+CREATE TABLE IF NOT EXISTS whatsapp_mensajes (
+  id           BIGSERIAL PRIMARY KEY,
+  usuario_id   INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+  telefono     VARCHAR(30),
+  jid          VARCHAR(80),
+  direccion    VARCHAR(10) NOT NULL, -- 'in' | 'out'
+  tipo         VARCHAR(20) NOT NULL DEFAULT 'text', -- text | image | system
+  cuerpo       TEXT,
+  caption      TEXT,
+  intencion    VARCHAR(40),
+  imei_contexto VARCHAR(40),
+  meta         JSONB,
+  creado_en    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_wa_msg_usuario_fecha
+  ON whatsapp_mensajes (usuario_id, creado_en DESC);
+CREATE INDEX IF NOT EXISTS idx_wa_msg_telefono_fecha
+  ON whatsapp_mensajes (telefono, creado_en DESC);
+
+-- Seguimiento de alertas (reavisos por umbral de horas)
+CREATE TABLE IF NOT EXISTS alerta_seguimiento (
+  id                     SERIAL PRIMARY KEY,
+  usuario_id             INTEGER NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+  imei                   VARCHAR(40) NOT NULL,
+  codigo                 VARCHAR(50) NOT NULL,
+  iniciado_en            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  ultima_notificacion_en TIMESTAMPTZ,
+  ultimo_umbral_horas    NUMERIC(6,2) DEFAULT 0,
+  ack_en                 TIMESTAMPTZ,
+  estado                 VARCHAR(20) NOT NULL DEFAULT 'activo',
+  dia_lima               DATE,
+  meta                   JSONB
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_alerta_seg_activo
+  ON alerta_seguimiento (usuario_id, imei, codigo)
+  WHERE estado = 'activo';
+
+ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS fuera_desde TIMESTAMPTZ;
+
+-- Config umbrales fuera de rango / reavisos / recuperación
+ALTER TABLE config_api ADD COLUMN IF NOT EXISTS fuera_rango_minutos_min INTEGER NOT NULL DEFAULT 120;
+ALTER TABLE config_api ADD COLUMN IF NOT EXISTS reaviso_paso_horas NUMERIC(4,2) NOT NULL DEFAULT 1;
+ALTER TABLE config_api ADD COLUMN IF NOT EXISTS reaviso_max_horas_dia NUMERIC(5,2) NOT NULL DEFAULT 20;
+ALTER TABLE config_api ADD COLUMN IF NOT EXISTS alerta_en_rango BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE config_api ADD COLUMN IF NOT EXISTS historico_fecha_ya_lima BOOLEAN NOT NULL DEFAULT true;
+
+-- TermoKing / link2 puede enviar IMEI o serie > 20 chars (hasta ~40+)
+ALTER TABLE dispositivos ALTER COLUMN imei TYPE VARCHAR(64);
+DO $$ BEGIN
+  ALTER TABLE equipos ALTER COLUMN imei TYPE VARCHAR(64);
+  ALTER TABLE equipos ALTER COLUMN id_equipo TYPE VARCHAR(64);
+EXCEPTION WHEN undefined_column THEN NULL;
+WHEN undefined_table THEN NULL;
+END $$;
+DO $$ BEGIN
+  ALTER TABLE alertas ALTER COLUMN equipo_id TYPE VARCHAR(64);
+EXCEPTION WHEN undefined_table THEN NULL;
+END $$;
+
+-- Monitor externo ztrack (correo) → disparador WhatsApp
+ALTER TABLE config_api ADD COLUMN IF NOT EXISTS monitor_externo_url VARCHAR(500)
+  DEFAULT 'https://ztrack.app/reefer/api/correo/external/monitor';
+ALTER TABLE config_api ADD COLUMN IF NOT EXISTS monitor_externo_minutos INTEGER NOT NULL DEFAULT 5;
+ALTER TABLE config_api ADD COLUMN IF NOT EXISTS monitor_externo_activo BOOLEAN NOT NULL DEFAULT true;
+
+CREATE TABLE IF NOT EXISTS monitor_envios_procesados (
+  envio_id     VARCHAR(80) PRIMARY KEY,
+  imei         VARCHAR(64),
+  alert_kind   VARCHAR(40),
+  umbral_horas NUMERIC(6,2),
+  procesado_en TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  meta         JSONB
+);
+CREATE INDEX IF NOT EXISTS idx_monitor_envios_imei ON monitor_envios_procesados (imei, procesado_en DESC);
+
+ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS prioridad_monitor BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS monitor_row_key VARCHAR(80);
+ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS monitor_grupo VARCHAR(120);
+
+-- Control: un umbral (ej. apagado 2h) se notifica WA una sola vez por día Lima
+CREATE TABLE IF NOT EXISTS monitor_umbrales_notificados (
+  imei          VARCHAR(64) NOT NULL,
+  alert_kind    VARCHAR(40) NOT NULL,
+  umbral_key    NUMERIC(8,2) NOT NULL,
+  dia_lima      DATE NOT NULL,
+  envio_id      VARCHAR(80),
+  notificado_en TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (imei, alert_kind, umbral_key, dia_lima)
+);
+CREATE INDEX IF NOT EXISTS idx_monitor_umbrales_imei
+  ON monitor_umbrales_notificados (imei, dia_lima DESC);
+
+-- Histórico de cada poll al API monitor correo (éxito / error)
+CREATE TABLE IF NOT EXISTS monitor_api_consultas (
+  id               BIGSERIAL PRIMARY KEY,
+  consultado_en    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  url              VARCHAR(500) NOT NULL,
+  ok               BOOLEAN NOT NULL DEFAULT false,
+  http_status      INTEGER,
+  error_mensaje    TEXT,
+  duracion_ms      INTEGER,
+  generated_at     TIMESTAMPTZ,
+  ciclo_id         VARCHAR(80),
+  resumen          JSONB,
+  equipos_resumen  JSONB,
+  alertas_resumen  JSONB,
+  payload          JSONB,
+  wa_encolados     INTEGER NOT NULL DEFAULT 0,
+  prioridad_count  INTEGER,
+  en_api_local     INTEGER,
+  procesado_wa     BOOLEAN NOT NULL DEFAULT false,
+  meta             JSONB
+);
+CREATE INDEX IF NOT EXISTS idx_monitor_api_consultas_en
+  ON monitor_api_consultas (consultado_en DESC);
+CREATE INDEX IF NOT EXISTS idx_monitor_api_consultas_ok
+  ON monitor_api_consultas (ok, consultado_en DESC);
+

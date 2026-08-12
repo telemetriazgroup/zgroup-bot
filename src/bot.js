@@ -141,6 +141,85 @@ function aChatId(jid) {
     .replace(/@.*/, '') + '@c.us'
 }
 
+/** Cache LID WhatsApp → teléfono real (WhatsApp ya no siempre manda @c.us) */
+const lidATelefono = new Map()
+
+function digitosDeJid(jid) {
+  return String(jid || '')
+    .replace(/@.*$/, '')
+    .replace(/\D/g, '')
+}
+
+/**
+ * Resuelve el teléfono real del remitente.
+ * WhatsApp Web reciente usa @lid (Linked ID); hay que mapearlo a @c.us.
+ */
+async function resolverTelefonoRemitente(waClient, msg) {
+  const from = String(msg.from || '')
+  const esGrupo = from.endsWith('@g.us')
+  const targetId = esGrupo
+    ? String(msg.author || msg.id?.participant || '')
+    : from
+
+  if (!targetId) return null
+
+  if (lidATelefono.has(targetId)) return lidATelefono.get(targetId)
+
+  // Chat privado clásico: 519...@c.us
+  if (targetId.endsWith('@c.us') || targetId.endsWith('@s.whatsapp.net')) {
+    const n = digitosDeJid(targetId)
+    if (n) {
+      lidATelefono.set(targetId, n)
+      return n
+    }
+  }
+
+  // LID → phone number
+  try {
+    if (typeof waClient.getContactLidAndPhone === 'function') {
+      const pairs = await waClient.getContactLidAndPhone([targetId])
+      const pn = pairs?.[0]?.pn
+      const n = digitosDeJid(pn)
+      if (n && n.length >= 8) {
+        logger.info(`🔗 LID resuelto: ${targetId} → ${n}`)
+        lidATelefono.set(targetId, n)
+        if (pairs[0]?.lid) lidATelefono.set(pairs[0].lid, n)
+        return n
+      }
+    }
+  } catch (err) {
+    logger.warn(`getContactLidAndPhone(${targetId}): ${err.message}`)
+  }
+
+  try {
+    const contact = await msg.getContact()
+    const server = contact?.id?.server
+    if (contact?.number && server && server !== 'lid') {
+      const n = String(contact.number).replace(/\D/g, '')
+      if (n.length >= 8) {
+        lidATelefono.set(targetId, n)
+        return n
+      }
+    }
+    if (contact?.id?._serialized && typeof waClient.getContactLidAndPhone === 'function') {
+      const pairs = await waClient.getContactLidAndPhone([contact.id._serialized])
+      const n = digitosDeJid(pairs?.[0]?.pn)
+      if (n && n.length >= 8) {
+        logger.info(`🔗 LID (contact) resuelto: ${contact.id._serialized} → ${n}`)
+        lidATelefono.set(targetId, n)
+        return n
+      }
+    }
+  } catch (err) {
+    logger.warn(`getContact remitente: ${err.message}`)
+  }
+
+  // Último recurso: dígitos del JID (puede ser LID, no teléfono)
+  const fallback = digitosDeJid(targetId)
+  logger.warn(`⚠️ No se pudo mapear LID→teléfono para ${targetId} (fallback ${fallback})`)
+  return fallback || null
+}
+
 function crearAdapter(waClient) {
   return {
     get user() {
@@ -250,12 +329,22 @@ function registrarEventos(waClient) {
     try {
       if (msg.fromMe) return
       if (msg.isStatus) return
+
+      const telefono = await resolverTelefonoRemitente(waClient, msg)
+      if (!telefono) {
+        logger.warn(`Mensaje sin teléfono resoluble (from=${msg.from})`)
+        return
+      }
+
+      logger.info(`📩 WA from=${msg.from} → tel=${telefono} body="${String(msg.body || '').slice(0, 80)}"`)
+
       const wrapped = {
         key: {
-          remoteJid: String(msg.from).replace('@c.us', '@s.whatsapp.net'),
+          remoteJid: `${telefono}@s.whatsapp.net`,
           fromMe: false
         },
-        message: { conversation: msg.body || '' }
+        message: { conversation: msg.body || '' },
+        _rawFrom: msg.from
       }
       await manejarMensaje(crearAdapter(waClient), wrapped)
     } catch (err) {

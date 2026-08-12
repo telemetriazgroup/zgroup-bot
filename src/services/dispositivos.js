@@ -1,18 +1,42 @@
 const { db } = require('../db')
 const { logger } = require('../logger')
 
+/**
+ * Fechas del reporte de dispositivos ya vienen en hora Lima (GMT-5),
+ * normalmente sin zona (`2026-08-11 21:45:40`). Si se parsean como UTC
+ * y luego se muestran con America/Lima, se restan 5 h de más.
+ */
 function parseFecha(str) {
   if (!str) return null
-  return new Date(str.replace(' ', 'T'))
+  let s = String(str).trim()
+  if (!s) return null
+  if (s.includes(' ') && !s.includes('T')) s = s.replace(' ', 'T')
+  // Ya trae zona explícita → respetar
+  if (/[zZ]$/.test(s) || /[+-]\d{2}:?\d{2}$/.test(s)) {
+    const d = new Date(s)
+    return Number.isNaN(d.getTime()) ? null : d
+  }
+  // Sin zona: interpretar como Lima (sin DST)
+  const d = new Date(`${s}-05:00`)
+  return Number.isNaN(d.getTime()) ? null : d
 }
 
 function normalizarDispositivo(item, estado_conexion, linkConfig) {
+  let imei = String(item.imei ?? '').trim()
+  if (!imei) return null
+  // Columna VARCHAR(64); TermoKing a veces manda IDs largos/corruptos
+  if (imei.length > 64) {
+    logger.warn(`[${linkConfig.link_id}] IMEI truncado (${imei.length}→64): ${imei.slice(0, 40)}…`)
+    imei = imei.slice(0, 64)
+  }
+  const tipo = String(item.tipo || linkConfig.tipo_default || linkConfig.nombre || '').slice(0, 50)
+  const lastIp = item.last_ip != null ? String(item.last_ip).slice(0, 50) : null
   return {
-    imei: item.imei,
-    tipo: item.tipo || linkConfig.tipo_default || linkConfig.nombre,
+    imei,
+    tipo: tipo || null,
     estado_conexion,
     ultimo_dato: parseFecha(item.ultimo_dato),
-    last_ip: item.last_ip,
+    last_ip: lastIp,
     fecha_registro: parseFecha(item.fecha),
     link_origen: linkConfig.link_id
   }
@@ -47,12 +71,18 @@ async function sincronizarLink(linkConfig, umbrales, mapAnterior) {
     ...(data.online || []).map(d => normalizarDispositivo(d, 'online', linkConfig)),
     ...(data.wait || []).map(d => normalizarDispositivo(d, 'wait', linkConfig)),
     ...(data.offline || []).map(d => normalizarDispositivo(d, 'offline', linkConfig))
-  ]
+  ].filter(Boolean)
 
   const cambios = []
   for (const d of todos) {
     const prev = mapAnterior[d.imei]
-    const guardado = await db.upsertDispositivo(d)
+    let guardado
+    try {
+      guardado = await db.upsertDispositivo(d)
+    } catch (err) {
+      logger.error(`[${linkConfig.link_id}] upsert ${d.imei}: ${err.message}`)
+      continue
+    }
     mapAnterior[d.imei] = guardado
 
     if (prev && prev.estado_conexion !== d.estado_conexion && guardado.alarmas_activas) {

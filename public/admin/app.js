@@ -59,6 +59,9 @@ document.querySelectorAll('.nav-item[data-section]').forEach(el => {
       usuarios: cargarUsuarios,
       equipos: cargarEquipos,
       alertas: () => cargarAlertas(true),
+      historial: cargarHistorialWa,
+      monitor: cargarMonitorZtrack,
+      datos: () => {},
       config: cargarConfig
     }
     loaders[el.dataset.section]?.()
@@ -173,7 +176,7 @@ function renderDispositivos() {
             <span class="slider"></span>
           </label>
         </td>
-        <td><code>${d.imei}</code></td>
+        <td><code>${d.imei}</code>${d.prioridad_monitor ? ' <span class="badge badge-ok" title="Prioridad ztrack">ztrack</span>' : (d.monitor_row_key ? ' <span class="badge badge-off" title="En monitor correo, prioridad OFF">correo</span>' : '')}</td>
         <td>${d.nombre || '<span style="color:var(--muted)">Sin nombre</span>'}</td>
         <td>${badgeEstado(d.estado_conexion)}</td>
         <td>${d.total_usuarios > 0
@@ -297,6 +300,17 @@ async function cargarLiveControl(id) {
     document.getElementById('control-sensor').value = d.sensor_control || 'return_air'
     document.getElementById('control-alerta-setpoint').checked = d.alerta_setpoint !== false
     document.getElementById('control-alarma-activa').checked = d.alarmas_activas
+    const prio = document.getElementById('control-prioridad-monitor')
+    if (prio) {
+      prio.checked = !!d.prioridad_monitor
+      prio.disabled = !d.monitor_row_key && !d.prioridad_monitor
+    }
+    const prioHint = document.getElementById('control-prioridad-hint')
+    if (prioHint) {
+      prioHint.textContent = d.monitor_row_key
+        ? `En monitor correo (${d.monitor_grupo || d.monitor_row_key}). ON = WA desde alertas ztrack (1× por umbral). OFF = lógica local.`
+        : 'Este IMEI aún no aparece en el monitor correo ztrack. La prioridad se activa sola la primera vez que coincida.'
+    }
 
     const grid = document.getElementById('control-sensores')
     const sensores = data.sensores.length ? data.sensores : [
@@ -347,7 +361,8 @@ async function guardarMonitoreo(e) {
     delta: deltaVal !== '' ? parseFloat(deltaVal) : null,
     sensor_control: document.getElementById('control-sensor').value,
     alerta_setpoint: document.getElementById('control-alerta-setpoint').checked,
-    alarmas_activas: document.getElementById('control-alarma-activa').checked
+    alarmas_activas: document.getElementById('control-alarma-activa').checked,
+    prioridad_monitor: document.getElementById('control-prioridad-monitor')?.checked === true
   }
   try {
     const r = await api(`/dispositivos/${id}/monitoreo`, { method: 'PUT', body: JSON.stringify(body) })
@@ -670,7 +685,8 @@ function renderAsigUsuarios() {
         <input type="checkbox" class="asig-user-cb" value="${u.id}" ${sel ? 'checked' : ''}
           onchange="onAsigUsuarioChange()">
         <span>${u.nombre} · ${u.telefono}</span>
-        ${!u.activo ? '<span class="badge badge-off" style="margin-left:auto">Inactivo</span>' : ''}
+        ${badgeAlertasWa(u)}
+        ${!u.activo ? '<span class="badge badge-off">Inactivo</span>' : ''}
       </label>`
   }).join('')
 
@@ -959,13 +975,14 @@ async function confirmarTestEstado() {
       method: 'POST',
       body: JSON.stringify({ usuario_ids: testEstadoUsuarioIds, dispositivo_ids, incluir_analisis_12h })
     })
-    const total = (res.resultados || []).reduce((a, r) => a + (r.enviados || 0), 0)
+    const total = (res.resultados || []).reduce((a, r) => a + (r.encolados || r.enviados || 0), 0)
     const errores = (res.resultados || []).filter(r => r.error || r.advertencia)
     cerrarModal('modal-test-estado')
+    cargarUsuarios()
     if (errores.length) {
-      toast(`Enviados ${total} mensaje(s). Avisos: ${errores.map(e => e.error || e.advertencia).join('; ')}`, 'error')
+      toast(`Activación encolada (${total} msg). Avisos: ${errores.map(e => e.error || e.advertencia).join('; ')}`, 'error')
     } else {
-      toast(`Estado enviado: ${total} mensaje(s)`)
+      toast(`Prueba de activación encolada (${total} msg). El usuario debe responder 3 veces en WA.`)
     }
   } catch (err) {
     toast(err.message, 'error')
@@ -976,6 +993,17 @@ async function confirmarTestEstado() {
 }
 
 // ── Usuarios ────────────────────────────────────────────────
+
+function badgeAlertasWa(u) {
+  if (u.alertas_habilitadas) {
+    return '<span class="badge badge-ok" title="Prueba completada">Activas</span>'
+  }
+  if (u.prueba_iniciada_en) {
+    const n = u.prueba_respuestas || 0
+    return `<span class="badge badge-off" title="Faltan respuestas">Prueba ${n}/3</span>`
+  }
+  return '<span class="badge badge-off" title="Enviar test de estado">Sin prueba</span>'
+}
 
 async function cargarUsuarios() {
   try {
@@ -989,12 +1017,43 @@ async function cargarUsuarios() {
         <td>${(u.dispositivos || []).map(d => d.nombre || d.imei).join(', ') || '—'}</td>
         <td>${(u.equipos || []).map(e => e.nombre || e.id_equipo).join(', ') || '—'}</td>
         <td>${u.activo ? '<span class="badge badge-ok">Sí</span>' : '<span class="badge badge-off">No</span>'}</td>
-        <td>
+        <td>${badgeAlertasWa(u)}</td>
+        <td style="white-space:nowrap">
           <button class="btn btn-sm btn-secondary" onclick='editarUsuario(${JSON.stringify(u).replace(/'/g, "&#39;")})'>Editar</button>
+          ${u.alertas_habilitadas
+            ? `<button class="btn btn-sm btn-secondary" title="Quitar permiso de alertas" onclick="revocarPruebaUsuario(${u.id}, '${String(u.nombre).replace(/'/g, "\\'")}')">Revocar</button>`
+            : `<button class="btn btn-sm btn-primary" title="Aprobar prueba sin WhatsApp" onclick="aprobarPruebaUsuario(${u.id}, '${String(u.nombre).replace(/'/g, "\\'")}')">Aprobar prueba</button>`
+          }
           <button class="btn btn-sm btn-danger" onclick="eliminarUsuario(${u.id})">Eliminar</button>
         </td>
       </tr>
     `).join('')
+  } catch (err) { toast(err.message, 'error') }
+}
+
+async function aprobarPruebaUsuario(id, nombre) {
+  if (!confirm(`¿Aprobar la prueba de activación de ${nombre}?\nPodrá recibir alertas WhatsApp sin completar las 3 respuestas.`)) return
+  try {
+    const res = await api(`/usuarios/${id}/aprobar-prueba`, {
+      method: 'POST',
+      body: JSON.stringify({ motivo: 'aprobacion_admin_ui' })
+    })
+    toast(res.nota || 'Prueba aprobada')
+    await cargarUsuarios()
+    if (typeof renderAsigUsuarios === 'function') renderAsigUsuarios()
+  } catch (err) { toast(err.message, 'error') }
+}
+
+async function revocarPruebaUsuario(id, nombre) {
+  if (!confirm(`¿Revocar la activación de ${nombre}?\nDejará de recibir alertas hasta nueva prueba o aprobación.`)) return
+  try {
+    const res = await api(`/usuarios/${id}/revocar-prueba`, {
+      method: 'POST',
+      body: JSON.stringify({ motivo: 'revocacion_admin_ui' })
+    })
+    toast(res.nota || 'Activación revocada')
+    await cargarUsuarios()
+    if (typeof renderAsigUsuarios === 'function') renderAsigUsuarios()
   } catch (err) { toast(err.message, 'error') }
 }
 
@@ -1194,6 +1253,22 @@ async function cargarConfig() {
     document.getElementById('cfg-alerta-online').checked = cfg.alerta_online
     document.getElementById('cfg-alerta-wait').checked = cfg.alerta_wait
     document.getElementById('cfg-alerta-offline').checked = cfg.alerta_offline
+    const fueraMin = document.getElementById('cfg-fuera-min')
+    if (fueraMin) fueraMin.value = String(cfg.fuera_rango_minutos_min || 120)
+    const paso = document.getElementById('cfg-reaviso-paso')
+    if (paso) paso.value = cfg.reaviso_paso_horas ?? 1
+    const maxH = document.getElementById('cfg-reaviso-max')
+    if (maxH) maxH.value = cfg.reaviso_max_horas_dia ?? 20
+    const enRango = document.getElementById('cfg-alerta-en-rango')
+    if (enRango) enRango.checked = cfg.alerta_en_rango !== false
+    const histLima = document.getElementById('cfg-hist-lima')
+    if (histLima) histLima.checked = cfg.historico_fecha_ya_lima !== false
+    const monUrl = document.getElementById('cfg-monitor-url')
+    if (monUrl) monUrl.value = cfg.monitor_externo_url || 'https://ztrack.app/reefer/api/correo/external/monitor'
+    const monMin = document.getElementById('cfg-monitor-min')
+    if (monMin) monMin.value = cfg.monitor_externo_minutos ?? 5
+    const monAct = document.getElementById('cfg-monitor-activo')
+    if (monAct) monAct.checked = cfg.monitor_externo_activo !== false
 
     document.getElementById('config-links-list').innerHTML = links.map(l => `
       <div class="config-link-card" data-link="${l.link_id}">
@@ -1245,11 +1320,248 @@ async function guardarConfig(e) {
     intervalo_minutos: parseInt(document.getElementById('cfg-intervalo').value),
     alerta_online: document.getElementById('cfg-alerta-online').checked,
     alerta_wait: document.getElementById('cfg-alerta-wait').checked,
-    alerta_offline: document.getElementById('cfg-alerta-offline').checked
+    alerta_offline: document.getElementById('cfg-alerta-offline').checked,
+    fuera_rango_minutos_min: parseInt(document.getElementById('cfg-fuera-min')?.value || '120', 10),
+    reaviso_paso_horas: parseFloat(document.getElementById('cfg-reaviso-paso')?.value || '1'),
+    reaviso_max_horas_dia: parseFloat(document.getElementById('cfg-reaviso-max')?.value || '20'),
+    alerta_en_rango: document.getElementById('cfg-alerta-en-rango')?.checked !== false,
+    historico_fecha_ya_lima: document.getElementById('cfg-hist-lima')?.checked !== false,
+    monitor_externo_url: document.getElementById('cfg-monitor-url')?.value || null,
+    monitor_externo_minutos: parseInt(document.getElementById('cfg-monitor-min')?.value || '5', 10),
+    monitor_externo_activo: document.getElementById('cfg-monitor-activo')?.checked !== false
   }
   try {
     await api('/config', { method: 'PUT', body: JSON.stringify(body) })
     toast('Parámetros guardados')
+  } catch (err) { toast(err.message, 'error') }
+}
+
+async function syncMonitorExterno(desdeModulo = false) {
+  try {
+    toast('Consultando API monitor ztrack…')
+    const r = await api('/monitor-externo/sync', { method: 'POST', body: '{}' })
+    if (r.ok === false) {
+      toast(r.error || 'Error de conexión al monitor', 'error')
+      if (desdeModulo || document.getElementById('sec-monitor')?.classList.contains('active')) {
+        cargarMonitorZtrack()
+      }
+      return
+    }
+    const n = (r.envios_wa || []).reduce((a, x) => a + (x.encolados || 0), 0)
+    toast(
+      r.bootstrap
+        ? `Bootstrap OK · ${r.prioridad || 0} prioridad · sin WA (histórico marcado)`
+        : r.procesado_wa === false
+          ? `API OK · WA desactivado · ${r.programados || 0} equipos`
+          : `Monitor OK · ${r.prioridad || 0} prioridad · ${n} WA (umbrales nuevos)`
+    )
+    if (desdeModulo || document.getElementById('sec-monitor')?.classList.contains('active')) {
+      cargarMonitorZtrack()
+    }
+  } catch (err) { toast(err.message, 'error') }
+}
+
+// ── Monitor ztrack (API correo) ─────────────────────────────
+
+let monitorEquiposCache = []
+
+async function cargarMonitorZtrack() {
+  try {
+    const estado = await api('/monitor-externo/estado')
+    const cfg = estado.config || {}
+    document.getElementById('mon-url').value = cfg.url || ''
+    document.getElementById('mon-min').value = cfg.minutos ?? 5
+    document.getElementById('mon-activo').checked = cfg.activo !== false
+
+    const s = estado.stats_24h || {}
+    document.getElementById('monitor-stats').innerHTML = `
+      <div class="stat-card ${estado.ultima?.ok ? 'online' : (estado.ultima ? 'offline' : '')}">
+        <div class="label">Última conexión</div>
+        <div class="value" style="font-size:1.1rem">${estado.ultima ? (estado.ultima.ok ? 'OK' : 'Error') : '—'}</div>
+      </div>
+      <div class="stat-card"><div class="label">Consultas 24h</div><div class="value">${s.total || 0}</div></div>
+      <div class="stat-card online"><div class="label">OK 24h</div><div class="value">${s.ok || 0}</div></div>
+      <div class="stat-card offline"><div class="label">Errores 24h</div><div class="value">${s.error || 0}</div></div>
+      <div class="stat-card"><div class="label">Prioridad WA</div><div class="value">${estado.prioridad_activos || 0}</div></div>
+    `
+
+    const u = estado.ultima
+    const uOk = estado.ultima_ok
+    document.getElementById('monitor-ultima-meta').innerHTML = u
+      ? `<strong>Última consulta:</strong> ${fmtFecha(u.consultado_en)} · ` +
+        `${u.ok ? '<span class="badge badge-ok">OK</span>' : '<span class="badge badge-off">Error</span>'}` +
+        (u.http_status != null ? ` · HTTP ${u.http_status}` : '') +
+        (u.duracion_ms != null ? ` · ${u.duracion_ms} ms` : '') +
+        (u.ciclo_id ? `<br><strong>Ciclo:</strong> <code>${u.ciclo_id}</code>` : '') +
+        (u.error_mensaje ? `<br><span style="color:var(--red)">${escHtml(u.error_mensaje)}</span>` : '') +
+        (uOk && uOk.id !== u.id
+          ? `<br><strong>Última OK:</strong> ${fmtFecha(uOk.consultado_en)}`
+          : '')
+      : 'Aún no hay consultas registradas. Pulsa «Consultar API ahora».'
+
+    monitorEquiposCache = Array.isArray(uOk?.equipos_resumen)
+      ? uOk.equipos_resumen
+      : (Array.isArray(uOk?.payload?.equiposProgramados) ? uOk.payload.equiposProgramados : [])
+    filtrarEquiposMonitor()
+
+    const alertas = Array.isArray(uOk?.alertas_resumen)
+      ? uOk.alertas_resumen
+      : (uOk?.payload?.ultimasAlertasEnviadas || [])
+    const ab = document.getElementById('monitor-alertas-body')
+    ab.innerHTML = alertas.length
+      ? alertas.map(a => `
+          <tr>
+            <td>${fmtFecha(a.sentAt)}</td>
+            <td><span class="badge">${escHtml(a.alertKind || '—')}</span></td>
+            <td>${escHtml(a.nombrePlataforma || a.imei || '—')}<br><code style="font-size:0.75rem">${escHtml(a.imei || '')}</code></td>
+            <td>${a.umbralHoras != null ? a.umbralHoras + ' h' : (a.horasOffline != null ? a.horasOffline + ' h off' : '—')}</td>
+          </tr>`).join('')
+      : '<tr><td colspan="4" class="empty">Sin alertas en la última consulta OK</td></tr>'
+
+    await cargarHistorialConsultasMonitor()
+  } catch (err) { toast(err.message, 'error') }
+}
+
+function escHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+function fmtRangoMonitor(eq) {
+  const r = eq.rangoProgramado
+  if (!r || r.setPoint == null) return '<span style="color:var(--muted)">Sin rango</span>'
+  return `set <strong>${r.setPoint}</strong> · ${r.min}…${r.max}` +
+    (r.margenInferior != null || r.margenSuperior != null
+      ? `<br><span class="hint">márgen −${r.margenInferior ?? '—'} / +${r.margenSuperior ?? '—'}</span>`
+      : '')
+}
+
+function fmtUmbralesMonitor(eq) {
+  const u = eq.umbralesHoras
+  if (!Array.isArray(u) || !u.length) return '—'
+  const cfg = eq.configuracionAlerta || {}
+  const extra = []
+  if (cfg.alerta30Minutos) extra.push('30m')
+  if (cfg.alerta1Hora) extra.push('1h')
+  const head = u.slice(0, 6).join(', ') + (u.length > 6 ? '…' : '')
+  return head + (extra.length ? `<br><span class="hint">${extra.join(' · ')}</span>` : '')
+}
+
+function filtrarEquiposMonitor() {
+  const q = (document.getElementById('monitor-eq-buscar')?.value || '').trim().toLowerCase()
+  const list = !q
+    ? monitorEquiposCache
+    : monitorEquiposCache.filter(eq => {
+        const txt = `${eq.imei} ${eq.nombrePlataforma || ''} ${eq.grupoNombre || ''} ${eq.cliente || ''}`.toLowerCase()
+        return txt.includes(q)
+      })
+  const tb = document.getElementById('monitor-equipos-body')
+  if (!list.length) {
+    tb.innerHTML = `<tr><td colspan="7" class="empty">${monitorEquiposCache.length ? 'Sin coincidencias' : 'Sin consulta exitosa aún'}</td></tr>`
+    return
+  }
+  tb.innerHTML = list.map(eq => {
+    const t = eq.telemetria || {}
+    const ev = eq.ultimaEvaluacion || {}
+    const epi = eq.episodioActivo
+    const enRango = eq.enRango
+    const rangoBadge = enRango === true
+      ? '<span class="badge badge-ok">en rango</span>'
+      : enRango === false
+        ? '<span class="badge badge-off">fuera</span>'
+        : '<span class="badge">n/d</span>'
+    return `
+      <tr>
+        <td>
+          <strong>${escHtml(eq.nombrePlataforma || eq.imei)}</strong><br>
+          <code style="font-size:0.75rem">${escHtml(eq.imei)}</code>
+          ${eq.codigo ? ` · ${escHtml(eq.codigo)}` : ''}
+        </td>
+        <td>${escHtml(eq.grupoNombre || '—')}<br><span class="hint">${escHtml(eq.cliente || '')}</span></td>
+        <td>${fmtRangoMonitor(eq)}<br>${rangoBadge}</td>
+        <td style="font-size:0.85rem">${fmtUmbralesMonitor(eq)}</td>
+        <td style="font-size:0.85rem">
+          ${t.estado_conexion ? badgeEstado(t.estado_conexion) : '—'}
+          ${t.return_air != null ? `<br>Ret ${t.return_air}°` : ''}
+          ${t.set_point != null ? ` · set ${t.set_point}°` : ''}
+          ${t.minutos_desde_ultimo_dato != null ? `<br><span class="hint">${t.minutos_desde_ultimo_dato} min</span>` : ''}
+        </td>
+        <td style="font-size:0.8rem">${escHtml(ev.estado || '—')}<br><span class="hint">${escHtml((ev.criterio || '').slice(0, 90))}${(ev.criterio || '').length > 90 ? '…' : ''}</span></td>
+        <td style="font-size:0.85rem">${epi
+          ? `<span class="badge">${escHtml(epi.kind)}</span><br><span class="hint">desde ${fmtFecha(epi.since)}</span>`
+          : '—'}</td>
+      </tr>`
+  }).join('')
+}
+
+async function cargarHistorialConsultasMonitor() {
+  try {
+    const soloErr = document.getElementById('monitor-solo-errores')?.checked
+    const r = await api('/monitor-externo/consultas?limit=40' + (soloErr ? '&errores=1' : ''))
+    const tb = document.getElementById('monitor-consultas-body')
+    const rows = r.consultas || []
+    tb.innerHTML = rows.length
+      ? rows.map(c => `
+          <tr>
+            <td>${fmtFecha(c.consultado_en)}</td>
+            <td>${c.ok
+              ? '<span class="badge badge-ok">OK</span>'
+              : '<span class="badge badge-off">Error</span>'}</td>
+            <td>${c.http_status ?? '—'}</td>
+            <td>${c.duracion_ms ?? '—'}</td>
+            <td>${c.equipos_count ?? '—'}</td>
+            <td>${c.alertas_count ?? '—'}</td>
+            <td>${c.wa_encolados ?? 0}</td>
+            <td>
+              <button class="btn btn-sm btn-secondary" onclick="verConsultaMonitor(${c.id})">Ver</button>
+              ${c.error_mensaje ? `<div class="hint" style="max-width:180px">${escHtml(c.error_mensaje).slice(0, 80)}</div>` : ''}
+            </td>
+          </tr>`).join('')
+      : '<tr><td colspan="8" class="empty">Sin consultas registradas</td></tr>'
+    document.getElementById('monitor-consultas-meta').textContent =
+      `Mostrando ${rows.length} de ${r.total || 0} (se conservan las últimas 500)`
+  } catch (err) { toast(err.message, 'error') }
+}
+
+async function verConsultaMonitor(id) {
+  try {
+    const c = await api(`/monitor-externo/consultas/${id}`)
+    const el = document.getElementById('monitor-consulta-detalle')
+    const resumen = c.resumen || {}
+    el.innerHTML = `
+      <p class="hint" style="margin-bottom:12px">
+        ${fmtFecha(c.consultado_en)} ·
+        ${c.ok ? '<span class="badge badge-ok">OK</span>' : '<span class="badge badge-off">Error</span>'} ·
+        HTTP ${c.http_status ?? '—'} · ${c.duracion_ms ?? '—'} ms
+      </p>
+      <p><strong>URL:</strong> <code style="word-break:break-all">${escHtml(c.url)}</code></p>
+      ${c.error_mensaje ? `<p style="color:var(--red)"><strong>Error:</strong> ${escHtml(c.error_mensaje)}</p>` : ''}
+      ${c.ciclo_id ? `<p><strong>Ciclo:</strong> <code>${escHtml(c.ciclo_id)}</code></p>` : ''}
+      <p><strong>Resumen API:</strong> ${escHtml(JSON.stringify(resumen))}</p>
+      <p><strong>WA encolados:</strong> ${c.wa_encolados ?? 0} ·
+         <strong>Prioridad:</strong> ${c.prioridad_count ?? '—'} ·
+         <strong>Procesó WA:</strong> ${c.procesado_wa ? 'sí' : 'no'}</p>
+      <h4 style="margin:16px 0 8px">Payload guardado</h4>
+      <pre style="background:var(--surface2);padding:12px;border-radius:8px;overflow:auto;max-height:360px;font-size:0.75rem">${escHtml(JSON.stringify(c.payload || { equipos: c.equipos_resumen, alertas: c.alertas_resumen }, null, 2))}</pre>
+    `
+    document.getElementById('modal-monitor-consulta').classList.remove('hidden')
+  } catch (err) { toast(err.message, 'error') }
+}
+
+async function guardarConfigMonitor(e) {
+  e.preventDefault()
+  const body = {
+    monitor_externo_url: document.getElementById('mon-url').value,
+    monitor_externo_minutos: parseInt(document.getElementById('mon-min').value || '5', 10),
+    monitor_externo_activo: document.getElementById('mon-activo').checked
+  }
+  try {
+    await api('/config', { method: 'PUT', body: JSON.stringify(body) })
+    toast('Configuración monitor guardada (intervalo aplica al reiniciar el bot)')
+    cargarMonitorZtrack()
   } catch (err) { toast(err.message, 'error') }
 }
 
@@ -1393,6 +1705,300 @@ async function reiniciarBotWhatsApp(nuevaVinculacion) {
   } catch (err) {
     toast(err.message, 'error')
   }
+}
+
+// ── Historial WhatsApp ──────────────────────────────────────
+
+let histTab = 'mensajes'
+let histSel = { usuario_id: null, telefono: null, titulo: '' }
+
+function setHistTab(tab) {
+  histTab = tab
+  document.querySelectorAll('[data-hist-tab]').forEach(b => {
+    b.classList.toggle('active', b.dataset.histTab === tab)
+  })
+  document.getElementById('hist-panel-mensajes').classList.toggle('hidden', tab !== 'mensajes')
+  document.getElementById('hist-panel-eventos').classList.toggle('hidden', tab !== 'eventos')
+  if (tab === 'eventos') cargarHistEventos()
+  else cargarHistMensajes()
+}
+
+async function cargarHistorialWa() {
+  try {
+    if (!usuariosCache.length) {
+      try { usuariosCache = await api('/usuarios') } catch { /* ignore */ }
+    }
+    const sel = document.getElementById('hist-filtro-usuario')
+    const prev = sel.value
+    sel.innerHTML = '<option value="">Todos / recientes</option>' +
+      (usuariosCache || []).map(u =>
+        `<option value="${u.id}">${u.nombre} · ${u.telefono}${u.alertas_habilitadas ? '' : ' (sin prueba)'}</option>`
+      ).join('')
+    if (prev) sel.value = prev
+
+    const hilos = await api('/conversacion/hilos?limite=60')
+    const list = document.getElementById('hist-hilos-list')
+    if (!hilos.length) {
+      list.innerHTML = '<p class="hint">Aún no hay mensajes guardados. Cuando el bot converse por WhatsApp, aparecerán aquí.</p>'
+    } else {
+      list.innerHTML = hilos.map(h => {
+        const key = h.usuario_id || h.telefono
+        const active =
+          (histSel.usuario_id && histSel.usuario_id === h.usuario_id) ||
+          (!histSel.usuario_id && histSel.telefono && histSel.telefono === h.telefono)
+        const nombre = h.usuario_nombre || h.telefono || 'Desconocido'
+        const preview = String(h.ultimo_cuerpo || h.ultimo_tipo || '').replace(/</g, '&lt;').slice(0, 80)
+        const cuando = h.ultimo_en ? fmtFecha(h.ultimo_en) : ''
+        const dir = h.ultimo_direccion === 'in' ? '←' : '→'
+        return `
+          <button type="button" class="hist-hilo ${active ? 'active' : ''}"
+            onclick='seleccionarHiloHistorial(${JSON.stringify({
+              usuario_id: h.usuario_id,
+              telefono: h.telefono,
+              titulo: nombre
+            }).replace(/'/g, "&#39;")})'>
+            <strong>${nombre}</strong>
+            <div class="hist-preview">${dir} ${preview || '—'}</div>
+            <div class="hist-meta">${cuando} · ${h.total_mensajes || 0} msg${h.alertas_habilitadas ? ' · alertas OK' : ''}</div>
+          </button>`
+      }).join('')
+    }
+
+    document.getElementById('hist-titulo-chat').textContent = histSel.titulo
+      ? `Chat: ${histSel.titulo}`
+      : 'Vista reciente (todos)'
+
+    if (histTab === 'eventos') await cargarHistEventos()
+    else await cargarHistMensajes()
+  } catch (err) {
+    toast(err.message, 'error')
+  }
+}
+
+function onFiltroHistorialUsuario() {
+  const id = document.getElementById('hist-filtro-usuario').value
+  if (!id) {
+    histSel = { usuario_id: null, telefono: null, titulo: '' }
+  } else {
+    const u = (usuariosCache || []).find(x => String(x.id) === String(id))
+    histSel = {
+      usuario_id: parseInt(id, 10),
+      telefono: u?.telefono || null,
+      titulo: u ? `${u.nombre} · ${u.telefono}` : id
+    }
+  }
+  document.querySelectorAll('.hist-hilo').forEach(el => el.classList.remove('active'))
+  cargarHistMensajes()
+  if (histTab === 'eventos') cargarHistEventos()
+  document.getElementById('hist-titulo-chat').textContent = histSel.titulo
+    ? `Chat: ${histSel.titulo}`
+    : 'Vista reciente (todos)'
+}
+
+function seleccionarHiloHistorial(h) {
+  histSel = {
+    usuario_id: h.usuario_id || null,
+    telefono: h.telefono || null,
+    titulo: h.titulo || h.telefono || ''
+  }
+  const sel = document.getElementById('hist-filtro-usuario')
+  if (h.usuario_id) sel.value = String(h.usuario_id)
+  else sel.value = ''
+  document.getElementById('hist-titulo-chat').textContent = `Chat: ${histSel.titulo}`
+  document.querySelectorAll('.hist-hilo').forEach(el => el.classList.remove('active'))
+  cargarHistMensajes()
+  if (histTab === 'eventos') cargarHistEventos()
+  // marcar activo de nuevo tras reload de hilos no es crítico
+}
+
+async function cargarHistMensajes() {
+  const box = document.getElementById('hist-mensajes')
+  box.innerHTML = '<p class="hint">Cargando mensajes…</p>'
+  try {
+    const qs = new URLSearchParams({ limite: '120' })
+    if (histSel.usuario_id) qs.set('usuario_id', histSel.usuario_id)
+    else if (histSel.telefono) qs.set('telefono', histSel.telefono)
+    const msgs = await api('/conversacion/mensajes?' + qs.toString())
+    if (!msgs.length) {
+      box.innerHTML = '<p class="hint">Sin mensajes en este hilo todavía.</p>'
+      return
+    }
+    box.innerHTML = msgs.map(m => {
+      const dir = m.direccion === 'in' ? 'in' : 'out'
+      const label = dir === 'in' ? 'Usuario' : 'Bot'
+      const cuerpo = String(m.cuerpo || m.caption || (m.tipo === 'image' ? '[imagen]' : '')).replace(/</g, '&lt;')
+      const extra = m.imei_contexto ? ` · IMEI ${m.imei_contexto}` : ''
+      const intent = m.intencion ? ` · ${m.intencion}` : ''
+      return `
+        <div class="hist-bubble ${dir}">
+          <div class="hist-dir">${label}${intent}${extra}</div>
+          <div>${cuerpo || '—'}</div>
+          <div class="hist-time">${fmtFecha(m.creado_en)}</div>
+        </div>`
+    }).join('')
+    box.scrollTop = box.scrollHeight
+  } catch (err) {
+    box.innerHTML = `<p class="hint" style="color:var(--red)">${err.message}</p>`
+  }
+}
+
+async function cargarHistEventos() {
+  const tbody = document.getElementById('hist-eventos-body')
+  tbody.innerHTML = '<tr><td colspan="4">Cargando…</td></tr>'
+  try {
+    const qs = new URLSearchParams({ limite: '80' })
+    if (histSel.usuario_id) qs.set('usuario_id', histSel.usuario_id)
+    const eventos = await api('/conversacion/eventos?' + qs.toString())
+    if (!eventos.length) {
+      tbody.innerHTML = '<tr><td colspan="4">Sin eventos</td></tr>'
+      return
+    }
+    tbody.innerHTML = eventos.map(e => `
+      <tr>
+        <td>${fmtFecha(e.creado_en)}</td>
+        <td>${e.usuario_nombre || e.telefono || e.usuario_id || '—'}</td>
+        <td><span class="badge badge-link">${e.tipo}</span></td>
+        <td style="max-width:360px;font-size:0.85rem">${String(e.detalle || '').replace(/</g, '&lt;')}</td>
+      </tr>
+    `).join('')
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="4">${err.message}</td></tr>`
+  }
+}
+
+// ── Exportar / Importar ─────────────────────────────────────
+
+let importPayloadCache = null
+
+function optsExportarDesdeUI() {
+  return {
+    usuarios: document.getElementById('exp-usuarios')?.checked !== false,
+    asignaciones: document.getElementById('exp-asignaciones')?.checked !== false,
+    dispositivos: document.getElementById('exp-dispositivos')?.checked !== false,
+    grupos: document.getElementById('exp-grupos')?.checked !== false,
+    alertas: document.getElementById('exp-alertas')?.checked !== false,
+    historial_wa: document.getElementById('exp-historial')?.checked !== false,
+    monitor_api: document.getElementById('exp-monitor')?.checked !== false,
+    config: document.getElementById('exp-config')?.checked !== false,
+    alertas_limit: parseInt(document.getElementById('exp-lim-alertas')?.value || '5000', 10),
+    mensajes_limit: parseInt(document.getElementById('exp-lim-msg')?.value || '10000', 10),
+    consultas_limit: parseInt(document.getElementById('exp-lim-consultas')?.value || '200', 10),
+    incluir_payload_consultas: document.getElementById('exp-payload-consultas')?.checked === true
+  }
+}
+
+function optsImportarDesdeUI() {
+  return {
+    usuarios: document.getElementById('imp-usuarios')?.checked !== false,
+    asignaciones: document.getElementById('imp-asignaciones')?.checked !== false,
+    dispositivos: document.getElementById('imp-dispositivos')?.checked !== false,
+    grupos: document.getElementById('imp-grupos')?.checked !== false,
+    alertas: document.getElementById('imp-alertas')?.checked !== false,
+    historial_wa: document.getElementById('imp-historial')?.checked !== false,
+    monitor_api: document.getElementById('imp-monitor')?.checked !== false,
+    config: document.getElementById('imp-config')?.checked !== false,
+    replace_asignaciones: document.getElementById('imp-replace-asig')?.checked === true
+  }
+}
+
+async function exportarDatosSistema(descargar) {
+  const body = optsExportarDesdeUI()
+  const prev = document.getElementById('exp-preview')
+  try {
+    toast(descargar ? 'Generando export…' : 'Calculando conteos…')
+    if (descargar) {
+      const res = await fetch(API + '/datos/export?download=1', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Api-Secret': secret
+        },
+        body: JSON.stringify({ ...body, download: true })
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.error || `Error ${res.status}`)
+      }
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `zgroup-export-${new Date().toISOString().slice(0, 10)}.json`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+      toast('Export descargado')
+      return
+    }
+    const data = await api('/datos/export', { method: 'POST', body: JSON.stringify(body) })
+    if (prev) {
+      prev.classList.remove('hidden')
+      prev.textContent = JSON.stringify({
+        exported_at: data.exported_at,
+        version: data.version,
+        counts: data.counts
+      }, null, 2)
+    }
+    toast('Vista previa lista')
+  } catch (err) { toast(err.message, 'error') }
+}
+
+function onImportFileSelected(ev) {
+  const file = ev.target.files?.[0]
+  const info = document.getElementById('imp-file-info')
+  const btn = document.getElementById('btn-importar')
+  importPayloadCache = null
+  if (btn) btn.disabled = true
+  if (!file) {
+    if (info) info.textContent = 'Ningún archivo cargado.'
+    return
+  }
+  const reader = new FileReader()
+  reader.onload = () => {
+    try {
+      const json = JSON.parse(reader.result)
+      if (!json.sections && json.version == null) {
+        throw new Error('El archivo no parece un export ZGroup (falta sections)')
+      }
+      importPayloadCache = json
+      const counts = json.counts || {}
+      const nUsers = counts.usuarios?.usuarios ?? json.sections?.usuarios?.usuarios?.length ?? '?'
+      const nDisp = counts.dispositivos?.dispositivos ?? json.sections?.dispositivos?.dispositivos?.length ?? '?'
+      if (info) {
+        info.textContent = `${file.name} · ${Math.round(file.size / 1024)} KB · export ${json.exported_at || 's/f'} · usuarios ${nUsers} · dispositivos ${nDisp}`
+      }
+      if (btn) btn.disabled = false
+    } catch (err) {
+      if (info) info.textContent = `Error: ${err.message}`
+      toast(err.message, 'error')
+    }
+  }
+  reader.readAsText(file)
+}
+
+async function importarDatosSistema() {
+  if (!importPayloadCache) {
+    toast('Selecciona un archivo JSON primero', 'error')
+    return
+  }
+  if (!confirm('¿Incorporar este archivo al sistema? Se fusionarán los datos (upsert).')) return
+  const out = document.getElementById('imp-result')
+  try {
+    toast('Importando…')
+    const r = await api('/datos/import', {
+      method: 'POST',
+      body: JSON.stringify({
+        payload: importPayloadCache,
+        options: optsImportarDesdeUI()
+      })
+    })
+    if (out) {
+      out.classList.remove('hidden')
+      out.textContent = JSON.stringify({ imported: r.imported, skipped: r.skipped }, null, 2)
+    }
+    toast('Importación completada')
+  } catch (err) { toast(err.message, 'error') }
 }
 
 // ── Init ────────────────────────────────────────────────────

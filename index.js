@@ -9,12 +9,14 @@ const { conectarWhatsApp } = require('./src/bot')
 const alertasRouter = require('./src/alertas')
 const { db } = require('./src/db')
 const { iniciarMonitor } = require('./src/services/alertas')
+const { iniciarMonitorExterno } = require('./src/services/monitor-externo')
+const { iniciarOutbox } = require('./src/services/outbox')
 const { logger } = require('./src/logger')
 
 const app  = express()
 const PORT = process.env.PORT || 9301
 
-app.use(express.json())
+app.use(express.json({ limit: '50mb' }))
 app.use('/admin', express.static(path.join(__dirname, 'public', 'admin')))
 
 // Middleware: validar token interno en todas las rutas /api
@@ -33,6 +35,7 @@ async function iniciar() {
   try {
     await db.initDb()
     logger.info('✅ Base de datos inicializada')
+    iniciarOutbox()
     try {
       await conectarWhatsApp()
     } catch (err) {
@@ -43,8 +46,10 @@ async function iniciar() {
       logger.info(`🖥️  Panel admin: http://localhost:${PORT}/admin`)
     })
     iniciarMonitor()
+    iniciarMonitorExterno()
   } catch (err) {
-    logger.error('Error al iniciar:', err)
+    logger.error('Error al iniciar:', err?.message || err)
+    if (err?.stack) logger.error(err.stack)
     process.exit(1)
   }
 }

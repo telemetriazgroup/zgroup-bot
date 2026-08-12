@@ -25,16 +25,36 @@ const db = {
   // ── Usuarios ──────────────────────────────────────────────
 
   async buscarUsuarioPorTelefono(telefono) {
+    const t = String(telefono || '').replace(/\D/g, '')
+    if (!t) return null
+
     const { rows } = await pool.query(
       'SELECT * FROM usuarios WHERE telefono = $1 AND activo = true LIMIT 1',
-      [telefono]
+      [t]
     )
-    return rows[0] || null
+    if (rows[0]) return rows[0]
+
+    // Variantes: con/sin código país (últimos 9 dígitos, típico PE)
+    if (t.length >= 9) {
+      const sufijo = t.slice(-9)
+      const { rows: rows2 } = await pool.query(
+        `SELECT * FROM usuarios
+         WHERE activo = true
+           AND (telefono = $1 OR telefono LIKE '%' || $1 OR RIGHT(REGEXP_REPLACE(telefono, '\\D', '', 'g'), 9) = $1)
+         LIMIT 1`,
+        [sufijo]
+      )
+      if (rows2[0]) return rows2[0]
+    }
+    return null
   },
 
   async listarUsuarios() {
     const { rows } = await pool.query(`
       SELECT u.id, u.nombre, u.telefono, u.activo, u.creado_en,
+        COALESCE(u.alertas_habilitadas, false) AS alertas_habilitadas,
+        COALESCE(u.prueba_respuestas, 0) AS prueba_respuestas,
+        u.prueba_iniciada_en, u.prueba_completada_en,
         COALESCE(json_agg(DISTINCT jsonb_build_object('id', e.id, 'id_equipo', e.id_equipo, 'nombre', e.nombre))
           FILTER (WHERE e.id IS NOT NULL), '[]') AS equipos,
         COALESCE((
@@ -53,6 +73,97 @@ const db = {
       GROUP BY u.id ORDER BY u.nombre
     `)
     return rows
+  },
+
+  async registrarEventoConversacion(usuarioId, tipo, { detalle = null, meta = null } = {}) {
+    const { rows } = await pool.query(
+      `INSERT INTO conversacion_eventos (usuario_id, tipo, detalle, meta)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [usuarioId || null, tipo, detalle, meta ? JSON.stringify(meta) : null]
+    )
+    return rows[0]
+  },
+
+  async listarEventosConversacion({ usuario_id, limite = 50 } = {}) {
+    const params = []
+    let where = ''
+    if (usuario_id) {
+      params.push(usuario_id)
+      where = `WHERE usuario_id = $${params.length}`
+    }
+    params.push(limite)
+    const { rows } = await pool.query(
+      `SELECT e.*, u.nombre AS usuario_nombre, u.telefono
+       FROM conversacion_eventos e
+       LEFT JOIN usuarios u ON u.id = e.usuario_id
+       ${where}
+       ORDER BY e.creado_en DESC
+       LIMIT $${params.length}`,
+      params
+    )
+    return rows
+  },
+
+  async iniciarPruebaActivacion(usuarioId) {
+    const { rows } = await pool.query(
+      `UPDATE usuarios SET
+         prueba_respuestas = 0,
+         prueba_iniciada_en = NOW(),
+         prueba_completada_en = NULL,
+         alertas_habilitadas = false
+       WHERE id = $1
+       RETURNING *`,
+      [usuarioId]
+    )
+    return rows[0] || null
+  },
+
+  async registrarRespuestaPrueba(usuarioId, { texto, intencion } = {}) {
+    const req = parseInt(process.env.PRUEBA_RESPUESTAS_REQUERIDAS || '3', 10)
+    const { rows } = await pool.query(
+      `UPDATE usuarios SET
+         prueba_respuestas = LEAST(COALESCE(prueba_respuestas, 0) + 1, $2),
+         alertas_habilitadas = CASE
+           WHEN LEAST(COALESCE(prueba_respuestas, 0) + 1, $2) >= $2 THEN true
+           ELSE COALESCE(alertas_habilitadas, false)
+         END,
+         prueba_completada_en = CASE
+           WHEN LEAST(COALESCE(prueba_respuestas, 0) + 1, $2) >= $2 THEN NOW()
+           ELSE prueba_completada_en
+         END
+       WHERE id = $1
+       RETURNING *`,
+      [usuarioId, req]
+    )
+    return rows[0] || null
+  },
+
+  async aprobarPruebaManual(usuarioId) {
+    const req = parseInt(process.env.PRUEBA_RESPUESTAS_REQUERIDAS || '3', 10)
+    const { rows } = await pool.query(
+      `UPDATE usuarios SET
+         alertas_habilitadas = true,
+         prueba_respuestas = $2,
+         prueba_iniciada_en = COALESCE(prueba_iniciada_en, NOW()),
+         prueba_completada_en = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [usuarioId, req]
+    )
+    return rows[0] || null
+  },
+
+  async revocarPruebaActivacion(usuarioId) {
+    const { rows } = await pool.query(
+      `UPDATE usuarios SET
+         alertas_habilitadas = false,
+         prueba_respuestas = 0,
+         prueba_completada_en = NULL
+       WHERE id = $1
+       RETURNING *`,
+      [usuarioId]
+    )
+    return rows[0] || null
   },
 
   async crearUsuario({ nombre, telefono, equipo_ids = [], grupo_ids = [], dispositivo_ids = [] }) {
@@ -459,14 +570,41 @@ const db = {
         alerta_offline = COALESCE($6, alerta_offline),
         intervalo_minutos = COALESCE($7, intervalo_minutos),
         url_live = COALESCE($8, url_live),
+        fuera_rango_minutos_min = COALESCE($9, fuera_rango_minutos_min),
+        reaviso_paso_horas = COALESCE($10, reaviso_paso_horas),
+        reaviso_max_horas_dia = COALESCE($11, reaviso_max_horas_dia),
+        alerta_en_rango = COALESCE($12, alerta_en_rango),
+        historico_fecha_ya_lima = COALESCE($13, historico_fecha_ya_lima),
+        monitor_externo_url = COALESCE($14, monitor_externo_url),
+        monitor_externo_minutos = COALESCE($15, monitor_externo_minutos),
+        monitor_externo_activo = COALESCE($16, monitor_externo_activo),
         actualizado_en = NOW()
       WHERE id = 1 RETURNING *
     `, [
       data.url, data.online_hasta_horas, data.wait_hasta_horas,
       data.alerta_online, data.alerta_wait, data.alerta_offline, data.intervalo_minutos,
-      data.url_live
+      data.url_live,
+      data.fuera_rango_minutos_min,
+      data.reaviso_paso_horas,
+      data.reaviso_max_horas_dia,
+      data.alerta_en_rango,
+      data.historico_fecha_ya_lima,
+      data.monitor_externo_url,
+      data.monitor_externo_minutos,
+      data.monitor_externo_activo
     ])
     return rows[0]
+  },
+
+  async setFueraDesde(dispositivoId, fueraDesde) {
+    await pool.query(
+      'UPDATE dispositivos SET fuera_desde = $2 WHERE id = $1',
+      [dispositivoId, fueraDesde]
+    )
+  },
+
+  async listarMensajesWhatsapp(opts) {
+    return require('./services/chat-historial').listarMensajes(opts)
   },
 
   async listarConfigLinks() {
@@ -621,7 +759,8 @@ const db = {
         sensor_control = COALESCE($4, sensor_control),
         alerta_setpoint = COALESCE($5, alerta_setpoint),
         alarmas_activas = COALESCE($6, alarmas_activas),
-        nombre = COALESCE($7, nombre)
+        nombre = COALESCE($7, nombre),
+        prioridad_monitor = COALESCE($8, prioridad_monitor)
       WHERE id = $1 RETURNING *
     `, [
       id,
@@ -630,7 +769,8 @@ const db = {
       data.sensor_control,
       data.alerta_setpoint,
       data.alarmas_activas,
-      data.nombre
+      data.nombre,
+      data.prioridad_monitor
     ])
     if (rows[0]) await this.asegurarEquipoDesdeDispositivo(rows[0])
     return rows[0]

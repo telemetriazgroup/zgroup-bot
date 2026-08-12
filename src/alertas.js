@@ -3,6 +3,13 @@ const { db } = require('./db')
 const { logger } = require('./logger')
 const { enviarAlertaWhatsApp, syncYAlertar, enviarTestAlarma } = require('./services/alertas')
 const { monitorearDispositivosActivos, obtenerLiveDispositivo, evaluarDispositivo } = require('./services/monitoreo')
+const {
+  sincronizarMonitorExterno,
+  listarConsultasMonitor,
+  obtenerConsultaMonitor,
+  obtenerEstadoMonitorUi
+} = require('./services/monitor-externo')
+const { exportarDatos, importarDatos, DEFAULT_OPTS } = require('./services/datos-transfer')
 const { enviarTestEstadoUsuario, enviarTestEstadoMultiples } = require('./services/estado')
 const { sincronizarDispositivos } = require('./services/dispositivos')
 
@@ -32,6 +39,36 @@ router.get('/usuarios', async (req, res) => {
   catch (err) { res.status(500).json({ error: err.message }) }
 })
 
+router.get('/conversacion/eventos', async (req, res) => {
+  try {
+    const usuario_id = req.query.usuario_id ? parseInt(req.query.usuario_id, 10) : null
+    const limite = req.query.limite ? parseInt(req.query.limite, 10) : 50
+    res.json(await db.listarEventosConversacion({ usuario_id, limite }))
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.get('/conversacion/mensajes', async (req, res) => {
+  try {
+    const { listarMensajes } = require('./services/chat-historial')
+    const usuario_id = req.query.usuario_id ? parseInt(req.query.usuario_id, 10) : null
+    const telefono = req.query.telefono || null
+    const limite = req.query.limite ? parseInt(req.query.limite, 10) : 80
+    res.json(await listarMensajes({
+      usuarioId: Number.isFinite(usuario_id) ? usuario_id : null,
+      telefono,
+      limite
+    }))
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.get('/conversacion/hilos', async (req, res) => {
+  try {
+    const { listarHilos } = require('./services/chat-historial')
+    const limite = req.query.limite ? parseInt(req.query.limite, 10) : 50
+    res.json(await listarHilos({ limite }))
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
 router.post('/usuarios', async (req, res) => {
   const { nombre, telefono, equipo_ids } = req.body
   if (!nombre || !telefono) return res.status(400).json({ error: 'nombre y telefono requeridos' })
@@ -45,6 +82,35 @@ router.put('/usuarios/:id', async (req, res) => {
   try {
     const usuario = await db.actualizarUsuario(parseInt(req.params.id), req.body)
     res.json(usuario)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.post('/usuarios/:id/aprobar-prueba', async (req, res) => {
+  try {
+    const { aprobarPruebaManual } = require('./services/prueba-activacion')
+    const motivo = req.body?.motivo || 'aprobacion_admin'
+    const result = await aprobarPruebaManual(parseInt(req.params.id, 10), { motivo })
+    res.json({
+      ok: true,
+      ya_activado: result.ya_activado,
+      usuario: result.usuario,
+      nota: result.ya_activado
+        ? 'El usuario ya tenía alertas habilitadas.'
+        : 'Prueba marcada como aprobada. Ya puede recibir alertas push.'
+    })
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.post('/usuarios/:id/revocar-prueba', async (req, res) => {
+  try {
+    const { revocarPruebaManual } = require('./services/prueba-activacion')
+    const motivo = req.body?.motivo || 'revocacion_admin'
+    const result = await revocarPruebaManual(parseInt(req.params.id, 10), { motivo })
+    res.json({
+      ok: true,
+      usuario: result.usuario,
+      nota: 'Activación revocada. Dejará de recibir alertas hasta nueva prueba o aprobación.'
+    })
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
@@ -124,6 +190,72 @@ router.put('/config', async (req, res) => {
   try {
     const config = await db.actualizarConfigApi(req.body)
     res.json(config)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.post('/monitor-externo/sync', async (req, res) => {
+  try {
+    const r = await sincronizarMonitorExterno()
+    res.json(r)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.get('/monitor-externo/estado', async (req, res) => {
+  try {
+    res.json(await obtenerEstadoMonitorUi())
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.get('/monitor-externo/consultas', async (req, res) => {
+  try {
+    res.json(await listarConsultasMonitor({
+      limit: req.query.limit,
+      offset: req.query.offset,
+      soloErrores: req.query.errores === '1' || req.query.errores === 'true'
+    }))
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.get('/monitor-externo/consultas/:id', async (req, res) => {
+  try {
+    const row = await obtenerConsultaMonitor(req.params.id)
+    if (!row) return res.status(404).json({ error: 'Consulta no encontrada' })
+    res.json(row)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+// ── Exportar / Importar datos ───────────────────────────────
+
+router.get('/datos/export-defaults', (req, res) => {
+  res.json({ defaults: DEFAULT_OPTS })
+})
+
+router.post('/datos/export', async (req, res) => {
+  try {
+    const data = await exportarDatos(req.body || {})
+    const download = req.query.download === '1' || req.body?.download === true
+    if (download) {
+      const fname = `zgroup-export-${new Date().toISOString().slice(0, 10)}.json`
+      res.setHeader('Content-Type', 'application/json; charset=utf-8')
+      res.setHeader('Content-Disposition', `attachment; filename="${fname}"`)
+      return res.send(JSON.stringify(data, null, 2))
+    }
+    res.json(data)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.post('/datos/import', async (req, res) => {
+  try {
+    const body = req.body || {}
+    const options = body.options || body.opts || {}
+    const dump = (body.payload && typeof body.payload === 'object')
+      ? body.payload
+      : body
+    if (!dump?.sections && dump?.version == null) {
+      return res.status(400).json({ error: 'JSON de exportación inválido (falta sections / version)' })
+    }
+    const result = await importarDatos(dump, options)
+    res.json({ ok: true, ...result })
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 

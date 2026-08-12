@@ -1,8 +1,20 @@
-const { getSock } = require('../bot')
 const { db } = require('../db')
 const { logger } = require('../logger')
 const { sincronizarDispositivos } = require('../services/dispositivos')
 const { monitorearDispositivosActivos } = require('../services/monitoreo')
+const { encolarConversacion, jidDeTelefono } = require('./outbox')
+const {
+  mensajeAvisoAlerta,
+  setContexto,
+  estaMuteado,
+  codigoATextoHumano
+} = require('./conversacion')
+const {
+  puedeRecibirAlertas,
+  omitirAlertaPorPrueba,
+  iniciarPrueba,
+  mensajesInicioPrueba
+} = require('./prueba-activacion')
 
 const TIPO_ALERTA = {
   online:  'Dispositivo en línea',
@@ -10,33 +22,47 @@ const TIPO_ALERTA = {
   offline: 'Dispositivo sin conexión'
 }
 
-async function enviarAlertaWhatsApp({ equipo_id, tipo_alerta, ubicacion, nivel }) {
-  const sock = getSock()
-  if (!sock) return { enviados: 0, error: 'Bot no conectado' }
-
+async function enviarAlertaWhatsApp({ equipo_id, tipo_alerta, ubicacion, nivel, codigo }) {
   const usuarios = await db.obtenerUsuariosDeEquipo(equipo_id)
-  if (!usuarios.length) return { enviados: 0, advertencia: 'Sin usuarios asignados' }
+  if (!usuarios.length) return { enviados: 0, encolados: 0, advertencia: 'Sin usuarios asignados' }
 
-  const emoji = nivel === 'critico' ? '🚨' : '⚠️'
-  const titulo = nivel === 'critico' ? 'ALERTA CRÍTICA' : 'ALERTA'
-  const mensaje =
-    `${emoji} *${titulo} REEFER — ZGroup*\n\n` +
-    `📦 Equipo: *${equipo_id}*\n` +
-    `⚠️ Tipo: ${tipo_alerta}\n` +
-    `📍 ${ubicacion || 'Sin ubicación'}\n` +
-    `🕐 ${new Date().toLocaleString('es-PE', { timeZone: 'America/Lima' })}\n\n` +
-    `Responde *ESTADO* para ver tus equipos.`
+  const disp = await db.obtenerDispositivoPorImei(equipo_id)
+  const nombre = disp?.nombre || equipo_id
+  const cod = codigo || 'alerta'
 
-  let enviados = 0
+  let encolados = 0
+  let bloqueados = 0
   for (const u of usuarios) {
-    try {
-      await sock.sendMessage(`${u.telefono}@s.whatsapp.net`, { text: mensaje })
-      enviados++
-    } catch (err) {
-      logger.error(`Error enviando a ${u.telefono}:`, err.message)
+    const jid = jidDeTelefono(u.telefono)
+    if (estaMuteado(jid)) continue
+    if (!puedeRecibirAlertas(u)) {
+      await omitirAlertaPorPrueba(u, { imei: equipo_id, codigo: cod })
+      bloqueados++
+      continue
     }
+
+    const texto = mensajeAvisoAlerta(u, {
+      nombreEquipo: nombre,
+      imei: equipo_id,
+      quePaso: tipo_alerta || `El reefer ${codigoATextoHumano(cod)}.`,
+      datoClave: ubicacion ? `Última IP/ubicación: ${ubicacion}` : null
+    })
+    encolarConversacion(jid, [texto], { prioridad: nivel === 'critico' ? 1 : 3 })
+    setContexto(jid, {
+      ultimo_usuario_id: u.id,
+      ultimo_imei: equipo_id,
+      ultimo_nombre_equipo: nombre,
+      ultima_alerta_codigo: cod,
+      esperando: 'seguimiento'
+    })
+    await db.registrarEventoConversacion(u.id, 'alerta_encolada', {
+      detalle: `Alerta encolada: ${cod || tipo_alerta} · ${nombre}`,
+      meta: { imei: equipo_id, codigo: cod, nivel }
+    })
+    encolados++
   }
-  return { enviados, total_usuarios: usuarios.length }
+
+  return { enviados: 0, encolados, bloqueados, total_usuarios: usuarios.length }
 }
 
 async function enviarTestAlarma(dispositivoId) {
@@ -48,42 +74,49 @@ async function enviarTestAlarma(dispositivoId) {
   if (!usuarios.length) {
     return {
       enviados: 0,
+      encolados: 0,
       total_usuarios: 0,
       advertencia: 'No hay usuarios asignados a este reefer. Asígnalos en Usuarios → Editar → Equipos.'
     }
   }
 
-  const sock = getSock()
-  if (!sock) return { enviados: 0, error: 'Bot de WhatsApp no conectado' }
-
   const nombre = disp.nombre || disp.imei
-  const mensaje =
-    `🧪 *PRUEBA DE ALARMA — ZGroup*\n\n` +
-    `📦 Reefer: *${nombre}*\n` +
-    `🔢 IMEI: ${disp.imei}\n` +
-    `📡 Estado: ${disp.estado_conexion}\n` +
-    `⚠️ Mensaje de *prueba* — no es una alerta real.\n` +
-    `🕐 ${new Date().toLocaleString('es-PE', { timeZone: 'America/Lima' })}\n\n` +
-    `Responde *ESTADO* para ver tus equipos.`
-
-  let enviados = 0
-  const errores = []
+  let encolados = 0
   for (const u of usuarios) {
-    try {
-      await sock.sendMessage(`${u.telefono}@s.whatsapp.net`, { text: mensaje })
-      enviados++
-      logger.info(`🧪 Test alarma enviada a ${u.nombre} (${u.telefono}) — ${disp.imei}`)
-    } catch (err) {
-      errores.push({ telefono: u.telefono, error: err.message })
-      logger.error(`Error test alarma a ${u.telefono}:`, err.message)
+    const { ya_activado } = await iniciarPrueba(u.id, {
+      origen: 'test-alarma',
+      meta: { imei: disp.imei, dispositivo_id: disp.id }
+    })
+    const jid = jidDeTelefono(u.telefono)
+    const lineas = mensajesInicioPrueba(u, {
+      totalDisp: 1,
+      criticos: [{ nombre, imei: disp.imei }],
+      yaActivado: ya_activado
+    })
+    if (!ya_activado) {
+      lineas[1] =
+        `Esto es la *activación* con el reefer *${nombre}* (IMEI ${disp.imei}).\n` +
+        `No es una alarma real: debes responderme *3 veces* para poder recibir alertas después.`
     }
+    encolarConversacion(jid, lineas, { prioridad: 4 })
+    setContexto(jid, {
+      ultimo_usuario_id: u.id,
+      ultimo_imei: disp.imei,
+      ultimo_nombre_equipo: nombre,
+      esperando: ya_activado ? 'seguimiento' : 'prueba_paso_1',
+      prueba_activa: !ya_activado
+    })
+    encolados++
+    logger.info(`🧪 Test/activación encolado → ${u.nombre} (${u.telefono}) — ${disp.imei}`)
   }
 
   return {
-    enviados,
+    enviados: 0,
+    encolados,
     total_usuarios: usuarios.length,
     usuarios: usuarios.map(u => ({ id: u.id, nombre: u.nombre, telefono: u.telefono })),
-    errores: errores.length ? errores : undefined
+    modo: 'activacion_conversacional',
+    nota: 'Cada usuario debe responder 3 veces; el evento queda en conversacion_eventos. Sin eso no hay alertas push.'
   }
 }
 
@@ -95,6 +128,9 @@ async function procesarCambiosEstado(cambios) {
 
   for (const c of cambios) {
     const nuevoEstado = c.a
+    // online: no push por defecto (anti-spam)
+    if (nuevoEstado === 'online') continue
+
     const flagConfig = config[`alerta_${nuevoEstado}`]
     const cfgTipo = mapConfig[nuevoEstado]
     if (!flagConfig || !cfgTipo?.activo) continue
@@ -111,7 +147,8 @@ async function procesarCambiosEstado(cambios) {
       equipo_id: c.imei,
       tipo_alerta: alerta.tipo,
       ubicacion: c.dispositivo?.last_ip,
-      nivel: cfgTipo.nivel
+      nivel: cfgTipo.nivel,
+      codigo: nuevoEstado
     })
     alertasEnviadas.push({ imei: c.imei, estado: nuevoEstado, ...resultado })
   }

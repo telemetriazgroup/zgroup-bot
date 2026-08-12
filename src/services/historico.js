@@ -67,7 +67,7 @@ function analizarFueraDeRango(registros, { setControl, delta }) {
   const maxHorasContinuas = maxMs / (1000 * 60 * 60)
   const horasEnteras = Math.floor(maxHorasContinuas)
   const mensajeHoras = horasEnteras >= HORAS_MINIMAS
-    ? `FUERA DE RANGO POR MAS DE ${horasEnteras} HORAS`
+    ? `Lleva más de ${horasEnteras} h seguidas fuera de rango (revisión 12 h).`
     : null
 
   const puntos = sorted.map(r => {
@@ -85,8 +85,24 @@ function analizarFueraDeRango(registros, { setControl, delta }) {
   return { maxHorasContinuas, mensajeHoras, horasEnteras, puntos, totalFuera, totalRegistros: sorted.length }
 }
 
-function fmtHora(fecha) {
-  return new Date(fecha).toLocaleTimeString('es-PE', {
+function fmtHora(fecha, { yaEsLima = true } = {}) {
+  // API histórico ya entrega hora Lima (GMT-5). No reaplicar America/Lima.
+  const s = String(fecha ?? '')
+  const m = s.match(/(\d{1,2}):(\d{2})(?::\d{2})?/)
+  if (m) {
+    return `${String(m[1]).padStart(2, '0')}:${m[2]}`
+  }
+  const d = new Date(fecha)
+  if (Number.isNaN(d.getTime())) return '--:--'
+  if (yaEsLima) {
+    return d.toLocaleTimeString('en-GB', {
+      timeZone: 'UTC',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    })
+  }
+  return d.toLocaleTimeString('es-PE', {
     timeZone: 'America/Lima',
     hour: '2-digit',
     minute: '2-digit',
@@ -100,9 +116,9 @@ function muestrearPuntos(puntos, maxPuntos = 72) {
   return puntos.filter((_, i) => i % step === 0 || i === puntos.length - 1)
 }
 
-async function generarGrafica12h(puntos, { imei, nombre, delta }) {
+async function generarGrafica12h(puntos, { imei, nombre, delta, yaEsLima = true }) {
   const muestreados = muestrearPuntos(puntos)
-  const labels = muestreados.map(p => fmtHora(p.fecha))
+  const labels = muestreados.map(p => fmtHora(p.fecha, { yaEsLima }))
   const returnAir = muestreados.map(p => p.return_air)
   const setPoint = muestreados.map(p => p.set_point)
   const bandMin = muestreados.map(p => p.min)
@@ -155,12 +171,12 @@ async function generarGrafica12h(puntos, { imei, nombre, delta }) {
     options: {
       title: {
         display: true,
-        text: `Trazabilidad 12h — ${nombre || imei}`,
+        text: `Trazabilidad 12h (hora Lima) — ${nombre || imei}`,
         fontSize: 14
       },
       legend: { display: true, position: 'bottom' },
       scales: {
-        xAxes: [{ scaleLabel: { display: true, labelString: 'Hora (últimas 12h)' } }],
+        xAxes: [{ scaleLabel: { display: true, labelString: 'Hora Lima (GMT-5)' } }],
         yAxes: [{ scaleLabel: { display: true, labelString: 'Temperatura °C' } }]
       }
     }
@@ -172,7 +188,7 @@ async function generarGrafica12h(puntos, { imei, nombre, delta }) {
   return Buffer.from(await res.arrayBuffer())
 }
 
-async function analizarYGenerarGrafica(disp, { setRef, delta }) {
+async function analizarYGenerarGrafica(disp, { setRef, delta, conImagen = true } = {}) {
   if (disp.link_origen && disp.link_origen !== 'link1') {
     return { analisis: null, imagen: null }
   }
@@ -180,17 +196,21 @@ async function analizarYGenerarGrafica(disp, { setRef, delta }) {
   const link = await db.obtenerConfigLink(disp.link_origen || 'link1')
   if (!link?.url_historico) return { analisis: null, imagen: null }
 
+  const configApi = await db.obtenerConfigApi().catch(() => null)
+  const yaEsLima = configApi?.historico_fecha_ya_lima !== false
+
   try {
     const { registros } = await fetchHistorico12h(disp.imei, disp.link_origen || 'link1')
     const setControl = disp.set_control != null ? parseFloat(disp.set_control) : null
     const analisis = analizarFueraDeRango(registros, { setControl, delta })
 
     let imagen = null
-    if (analisis.puntos.length) {
+    if (conImagen && analisis.puntos.length) {
       imagen = await generarGrafica12h(analisis.puntos, {
         imei: disp.imei,
         nombre: disp.nombre,
-        delta
+        delta,
+        yaEsLima
       })
     }
 
@@ -206,5 +226,6 @@ module.exports = {
   analizarFueraDeRango,
   generarGrafica12h,
   analizarYGenerarGrafica,
+  fmtHora,
   HORAS_MINIMAS
 }
