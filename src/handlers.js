@@ -14,7 +14,6 @@ const {
   construirItemsMenu,
   armarPaginaRaiz,
   armarPaginaGrupo,
-  mensajeOpcionesDispositivo,
   resolverSeleccionMenu,
   saludoMenu,
   etiquetaEquipo
@@ -111,10 +110,7 @@ async function enviarDetalleEquipo(jid, usuario, disp, { desdeGrupo = null } = {
     menu_opciones: [],
     esperando: 'seguimiento'
   })
-  const texto =
-    mensajeDetalleEquipo(d, { grupoNombre }) +
-    '\n' +
-    mensajeOpcionesDispositivo(d, { grupoNombre })
+  const texto = mensajeDetalleEquipo(d, { grupoNombre, conOpciones: true })
   encolarTexto(jid, texto, { prioridad: 2, usuarioId: usuario.id, imeiContexto: d.imei })
 }
 

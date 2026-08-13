@@ -39,7 +39,8 @@ async function enriquecerDispositivo(disp) {
 
 function calcularRango(d) {
   const sensorKey = d.sensor_control || 'return_air'
-  const sensorVal = d[sensorKey] ?? d.return_air
+  const sensorValRaw = d[sensorKey] ?? d.return_air
+  const sensorVal = sensorValRaw != null && sensorValRaw !== '' ? parseFloat(sensorValRaw) : null
   const sensorNombre = SENSORES[sensorKey] || sensorKey
   const zr = d.ztrack_rango && typeof d.ztrack_rango === 'object' ? d.ztrack_rango : null
 
@@ -49,34 +50,51 @@ function calcularRango(d) {
     const max = parseFloat(zr.max)
     const setRef = zr.setPoint != null ? parseFloat(zr.setPoint) : (min + max) / 2
     const delta = Math.max(Math.abs(setRef - min), Math.abs(max - setRef))
-    const fueraLive = sensorVal != null && (sensorVal < min || sensorVal > max)
-    const alertaFuera = d.alertas_pendientes?.some(a => a.codigo === 'fuera_de_rango')
+    // Fuente de verdad: temp actual vs banda mostrada (no flags stale ni alertas viejas)
+    let fueraDeRango = false
+    if (sensorVal != null && !Number.isNaN(sensorVal) && !Number.isNaN(min) && !Number.isNaN(max)) {
+      fueraDeRango = sensorVal < min || sensorVal > max
+    } else if (d.ztrack_en_rango === false) {
+      fueraDeRango = true
+    } else if (d.ztrack_en_rango === true) {
+      fueraDeRango = false
+    }
     return {
-      fueraDeRango: d.ztrack_en_rango === false || alertaFuera || fueraLive,
+      fueraDeRango,
       setRef,
       delta,
       min,
       max,
-      sensorVal,
+      sensorVal: Number.isNaN(sensorVal) ? null : sensorVal,
       sensorNombre,
-      alertaFuera,
       origen: 'ztrack'
     }
   }
 
   const delta = d.delta != null ? parseFloat(d.delta) : DELTA_DEFAULT
   const setRef = d.set_control != null ? parseFloat(d.set_control) : d.set_point_live
-  if (setRef == null || sensorVal == null) {
-    return { fueraDeRango: d.en_rango === false, setRef, delta, sensorVal, sensorNombre, origen: 'local' }
+  if (setRef == null || sensorVal == null || Number.isNaN(sensorVal)) {
+    return {
+      fueraDeRango: d.en_rango === false,
+      setRef,
+      delta,
+      sensorVal: Number.isNaN(sensorVal) ? null : sensorVal,
+      sensorNombre,
+      origen: 'local'
+    }
   }
 
   const min = setRef - delta
   const max = setRef + delta
   const fueraLive = sensorVal < min || sensorVal > max
-  const alertaFuera = d.alertas_pendientes?.some(a => a.codigo === 'fuera_de_rango')
   return {
-    fueraDeRango: d.en_rango === false || alertaFuera || fueraLive,
-    setRef, delta, min, max, sensorVal, sensorNombre, alertaFuera,
+    fueraDeRango: fueraLive,
+    setRef,
+    delta,
+    min,
+    max,
+    sensorVal,
+    sensorNombre,
     origen: 'local'
   }
 }

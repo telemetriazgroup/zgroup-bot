@@ -137,7 +137,7 @@ function mensajeResumenEstado(usuario, { total, conAlerta, criticos }) {
   return msg
 }
 
-function mensajeDetalleEquipo(d, { grupoNombre } = {}) {
+function mensajeDetalleEquipo(d, { grupoNombre, conOpciones = true } = {}) {
   const nombre = d.nombre || d.imei
   const r = d.rango || {}
   const lineas = [
@@ -145,12 +145,13 @@ function mensajeDetalleEquipo(d, { grupoNombre } = {}) {
   ]
   if (grupoNombre) lineas[0] += ` · ${grupoNombre}`
 
-  if (r.sensorVal != null && r.setRef != null) {
-    if (r.origen === 'ztrack') {
+  if (r.sensorVal != null && (r.min != null || r.setRef != null)) {
+    if (r.origen === 'ztrack' && r.min != null && r.max != null) {
       lineas.push(
-        `${r.sensorNombre || 'Sensor'}: *${r.sensorVal} °C* · rango ztrack ${r.min}…${r.max} °C (set ${r.setRef})`
+        `${r.sensorNombre || 'Sensor'}: *${r.sensorVal} °C* · rango ztrack ${r.min}…${r.max} °C` +
+          (r.setRef != null ? ` (set ${r.setRef})` : '')
       )
-    } else {
+    } else if (r.setRef != null) {
       lineas.push(
         `${r.sensorNombre || 'Sensor'}: *${r.sensorVal} °C* · set *${r.setRef} °C* (±${r.delta ?? 5})`
       )
@@ -166,8 +167,9 @@ function mensajeDetalleEquipo(d, { grupoNombre } = {}) {
       lineas.push(`Último dato: ${f}`)
     } catch { /* ignore */ }
   }
-  if (d.last_ip) lineas.push(`Última IP: ${d.last_ip}`)
-  lineas.push(`¿*GRAFICA*, *ULTIMOS*, *ACTUALIZAR* o *TODOS*?`)
+  if (conOpciones) {
+    lineas.push(`¿*GRAFICA*, *ULTIMOS*, *ACTUALIZAR* o *TODOS*?`)
+  }
   return lineas.join('\n')
 }
 
