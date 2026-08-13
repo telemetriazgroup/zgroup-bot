@@ -252,6 +252,10 @@ ALTER TABLE config_api ADD COLUMN IF NOT EXISTS monitor_externo_url VARCHAR(500)
 ALTER TABLE config_api ADD COLUMN IF NOT EXISTS monitor_externo_minutos INTEGER NOT NULL DEFAULT 5;
 ALTER TABLE config_api ADD COLUMN IF NOT EXISTS monitor_externo_activo BOOLEAN NOT NULL DEFAULT true;
 
+-- Wait sin datos: incidente interno vs aviso al usuario
+ALTER TABLE config_api ADD COLUMN IF NOT EXISTS wait_interno_horas NUMERIC(5,2) NOT NULL DEFAULT 2;
+ALTER TABLE config_api ADD COLUMN IF NOT EXISTS wait_usuario_horas NUMERIC(5,2) NOT NULL DEFAULT 4;
+
 CREATE TABLE IF NOT EXISTS monitor_envios_procesados (
   envio_id     VARCHAR(80) PRIMARY KEY,
   imei         VARCHAR(64),
@@ -304,4 +308,31 @@ CREATE INDEX IF NOT EXISTS idx_monitor_api_consultas_en
   ON monitor_api_consultas (consultado_en DESC);
 CREATE INDEX IF NOT EXISTS idx_monitor_api_consultas_ok
   ON monitor_api_consultas (ok, consultado_en DESC);
+
+-- Contexto ztrack por dispositivo (rangos API + último estado)
+ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS ztrack_rango JSONB;
+ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS ztrack_umbrales JSONB;
+ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS ztrack_en_rango BOOLEAN;
+ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS ztrack_estado VARCHAR(80);
+ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS ztrack_criterio TEXT;
+ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS ztrack_telemetria JSONB;
+ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS ztrack_episodio JSONB;
+ALTER TABLE dispositivos ADD COLUMN IF NOT EXISTS ztrack_actualizado_en TIMESTAMPTZ;
+
+-- Histórico de muestras del monitor (contexto si la API falla un rato)
+CREATE TABLE IF NOT EXISTS dispositivo_ztrack_historial (
+  id            BIGSERIAL PRIMARY KEY,
+  imei          VARCHAR(64) NOT NULL,
+  consultado_en TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  en_rango      BOOLEAN,
+  estado        VARCHAR(80),
+  criterio      TEXT,
+  rango         JSONB,
+  umbrales      JSONB,
+  telemetria    JSONB,
+  episodio      JSONB,
+  consulta_id   BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_ztrack_hist_imei
+  ON dispositivo_ztrack_historial (imei, consultado_en DESC);
 

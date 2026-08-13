@@ -26,67 +26,149 @@ async function fetchHistorico12h(imei, linkOrigen = 'link1') {
   return { registros, url, link_id: linkOrigen }
 }
 
-function estaFueraDeRango(returnAir, setRef, delta) {
-  if (returnAir == null || setRef == null) return false
-  const min = setRef - delta
-  const max = setRef + delta
+/**
+ * Rango efectivo: con prioridad ztrack usa min/max de la API;
+ * si no, set±delta local (o los pasados por el caller).
+ */
+function resolverRangoAnalisis(disp, { setRef = null, delta = null } = {}) {
+  const zr = disp?.ztrack_rango && typeof disp.ztrack_rango === 'object'
+    ? disp.ztrack_rango
+    : null
+
+  if (disp?.prioridad_monitor && zr && zr.min != null && zr.max != null) {
+    const min = parseFloat(zr.min)
+    const max = parseFloat(zr.max)
+    const set = zr.setPoint != null ? parseFloat(zr.setPoint) : (min + max) / 2
+    return {
+      origen: 'ztrack',
+      setControl: set,
+      min,
+      max,
+      delta: Math.max(Math.abs(set - min), Math.abs(max - set))
+    }
+  }
+
+  const set =
+    setRef != null && !Number.isNaN(parseFloat(setRef))
+      ? parseFloat(setRef)
+      : disp?.set_control != null
+        ? parseFloat(disp.set_control)
+        : null
+  const dlt =
+    delta != null && !Number.isNaN(parseFloat(delta))
+      ? parseFloat(delta)
+      : disp?.delta != null
+        ? parseFloat(disp.delta)
+        : 5
+
+  if (set == null || Number.isNaN(set)) {
+    return { origen: 'ninguno', setControl: null, min: null, max: null, delta: dlt }
+  }
+
+  return {
+    origen: 'local',
+    setControl: set,
+    min: set - dlt,
+    max: set + dlt,
+    delta: dlt
+  }
+}
+
+function estaFueraDeRangoAbs(returnAir, min, max) {
+  if (returnAir == null || min == null || max == null) return false
   return returnAir < min || returnAir > max
 }
 
-function analizarFueraDeRango(registros, { setControl, delta }) {
+function estaFueraDeRango(returnAir, setRef, delta) {
+  if (returnAir == null || setRef == null || delta == null) return false
+  return estaFueraDeRangoAbs(returnAir, setRef - delta, setRef + delta)
+}
+
+function analizarFueraDeRango(registros, rango) {
+  const min = rango.min
+  const max = rango.max
+  const setControl = rango.setControl
+  const delta = rango.delta
+
   const sorted = registros
-    .filter(r => r.return_air != null && (r.set_point != null || setControl != null))
+    .filter(r => r.return_air != null)
     .sort((a, b) => new Date(a.fecha) - new Date(b.fecha))
 
-  if (!sorted.length) {
-    return { maxHorasContinuas: 0, mensajeHoras: null, puntos: [], totalFuera: 0 }
+  if (!sorted.length || min == null || max == null) {
+    return {
+      maxHorasContinuas: 0,
+      horasActualesContinuas: 0,
+      mensajeHoras: null,
+      puntos: [],
+      totalFuera: 0,
+      actualmenteFuera: false,
+      origenRango: rango.origen
+    }
   }
 
   let maxMs = 0
   let currentMs = 0
   let prevTime = null
   let totalFuera = 0
+  let lastFuera = false
 
   for (const r of sorted) {
     const t = new Date(r.fecha).getTime()
-    const setRef = setControl != null ? parseFloat(setControl) : parseFloat(r.set_point)
-    const fuera = estaFueraDeRango(parseFloat(r.return_air), setRef, delta)
+    const fuera = estaFueraDeRangoAbs(parseFloat(r.return_air), min, max)
     const intervalMs = prevTime != null ? Math.max(0, t - prevTime) : 0
 
     if (fuera) {
       currentMs += intervalMs
       totalFuera++
+      lastFuera = true
     } else if (currentMs > 0) {
       maxMs = Math.max(maxMs, currentMs)
       currentMs = 0
+      lastFuera = false
+    } else {
+      lastFuera = false
     }
     prevTime = t
   }
   maxMs = Math.max(maxMs, currentMs)
 
   const maxHorasContinuas = maxMs / (1000 * 60 * 60)
-  const horasEnteras = Math.floor(maxHorasContinuas)
+  // Horas del episodio ACTUAL (al final de la serie), no el máximo del día
+  const horasActualesContinuas = lastFuera ? currentMs / (1000 * 60 * 60) : 0
+  const horasParaMensaje = lastFuera ? horasActualesContinuas : 0
+  const horasEnteras = Math.floor(horasParaMensaje)
+
   const mensajeHoras = horasEnteras >= HORAS_MINIMAS
-    ? `Lleva más de ${horasEnteras} h seguidas fuera de rango (revisión 12 h).`
+    ? `Lleva unas *${horasEnteras} h* seguidas fuera de rango (rango ${rango.origen}: ${min}…${max} °C).`
     : null
 
   const puntos = sorted.map(r => {
-    const setRef = setControl != null ? parseFloat(setControl) : parseFloat(r.set_point)
+    const setRef = setControl != null ? setControl : parseFloat(r.set_point)
     return {
       fecha: r.fecha,
       return_air: parseFloat(r.return_air),
       set_point: setRef,
-      min: setRef - delta,
-      max: setRef + delta,
-      fuera: estaFueraDeRango(parseFloat(r.return_air), setRef, delta)
+      min,
+      max,
+      fuera: estaFueraDeRangoAbs(parseFloat(r.return_air), min, max)
     }
   })
 
-  return { maxHorasContinuas, mensajeHoras, horasEnteras, puntos, totalFuera, totalRegistros: sorted.length }
+  return {
+    maxHorasContinuas,
+    horasActualesContinuas,
+    mensajeHoras,
+    horasEnteras,
+    puntos,
+    totalFuera,
+    totalRegistros: sorted.length,
+    actualmenteFuera: lastFuera,
+    origenRango: rango.origen,
+    rango: { min, max, set: setControl, delta, origen: rango.origen }
+  }
 }
 
 function fmtHora(fecha, { yaEsLima = true } = {}) {
-  // API histórico ya entrega hora Lima (GMT-5). No reaplicar America/Lima.
   const s = String(fecha ?? '')
   const m = s.match(/(\d{1,2}):(\d{2})(?::\d{2})?/)
   if (m) {
@@ -116,13 +198,16 @@ function muestrearPuntos(puntos, maxPuntos = 72) {
   return puntos.filter((_, i) => i % step === 0 || i === puntos.length - 1)
 }
 
-async function generarGrafica12h(puntos, { imei, nombre, delta, yaEsLima = true }) {
+async function generarGrafica12h(puntos, { imei, nombre, delta, min, max, origenRango = 'local', yaEsLima = true }) {
   const muestreados = muestrearPuntos(puntos)
   const labels = muestreados.map(p => fmtHora(p.fecha, { yaEsLima }))
   const returnAir = muestreados.map(p => p.return_air)
   const setPoint = muestreados.map(p => p.set_point)
   const bandMin = muestreados.map(p => p.min)
   const bandMax = muestreados.map(p => p.max)
+  const limLabel = origenRango === 'ztrack'
+    ? `Banda ztrack (${min}…${max})`
+    : `Límite ±${delta}°C`
 
   const chartConfig = {
     type: 'line',
@@ -149,7 +234,7 @@ async function generarGrafica12h(puntos, { imei, nombre, delta, yaEsLima = true 
           borderWidth: 2
         },
         {
-          label: `Límite +${delta}°C`,
+          label: `${limLabel} máx`,
           data: bandMax,
           borderColor: 'rgba(239,68,68,0.5)',
           borderDash: [2, 4],
@@ -158,7 +243,7 @@ async function generarGrafica12h(puntos, { imei, nombre, delta, yaEsLima = true 
           borderWidth: 1
         },
         {
-          label: `Límite -${delta}°C`,
+          label: `${limLabel} mín`,
           data: bandMin,
           borderColor: 'rgba(239,68,68,0.5)',
           borderDash: [2, 4],
@@ -171,7 +256,7 @@ async function generarGrafica12h(puntos, { imei, nombre, delta, yaEsLima = true 
     options: {
       title: {
         display: true,
-        text: `Trazabilidad 12h (hora Lima) — ${nombre || imei}`,
+        text: `Trazabilidad 12h (hora Lima) — ${nombre || imei} [${origenRango}]`,
         fontSize: 14
       },
       legend: { display: true, position: 'bottom' },
@@ -188,6 +273,22 @@ async function generarGrafica12h(puntos, { imei, nombre, delta, yaEsLima = true 
   return Buffer.from(await res.arrayBuffer())
 }
 
+function mensajeHorasDesdeZtrack(disp, analisis) {
+  // Priorizar el análisis de la curva con la misma banda dibujada (ztrack min/max).
+  // Evita reportar el máximo histórico de la ventana (ej. 11 h) cuando el episodio actual es ~2 h.
+  if (analisis?.mensajeHoras) return analisis.mensajeHoras
+
+  const epi = disp?.ztrack_episodio
+  if (disp?.prioridad_monitor && epi?.since && analisis?.actualmenteFuera !== false) {
+    const h = Math.max(0, (Date.now() - new Date(epi.since).getTime()) / 3600000)
+    const enteras = Math.floor(h)
+    if (enteras >= HORAS_MINIMAS) {
+      return `Episodio ztrack (*${epi.kind || 'fuera'}*): ~${enteras} h activas. Rango API ${analisis?.rango?.min}…${analisis?.rango?.max} °C.`
+    }
+  }
+  return null
+}
+
 async function analizarYGenerarGrafica(disp, { setRef, delta, conImagen = true } = {}) {
   if (disp.link_origen && disp.link_origen !== 'link1') {
     return { analisis: null, imagen: null }
@@ -201,24 +302,46 @@ async function analizarYGenerarGrafica(disp, { setRef, delta, conImagen = true }
 
   try {
     const { registros } = await fetchHistorico12h(disp.imei, disp.link_origen || 'link1')
-    const setControl = disp.set_control != null ? parseFloat(disp.set_control) : null
-    const analisis = analizarFueraDeRango(registros, { setControl, delta })
+    const rango = resolverRangoAnalisis(disp, { setRef, delta })
+    const analisis = analizarFueraDeRango(registros, rango)
+    analisis.mensajeHoras = mensajeHorasDesdeZtrack(disp, analisis) || analisis.mensajeHoras
 
     let imagen = null
-    if (conImagen && analisis.puntos.length) {
+    if (conImagen && analisis.puntos.length && rango.min != null) {
       imagen = await generarGrafica12h(analisis.puntos, {
         imei: disp.imei,
         nombre: disp.nombre,
-        delta,
+        delta: rango.delta,
+        min: rango.min,
+        max: rango.max,
+        origenRango: rango.origen,
         yaEsLima
       })
     }
 
-    return { analisis, imagen }
+    return { analisis, imagen, rango }
   } catch (err) {
     logger.warn(`Histórico 12h falló para ${disp.imei}: ${err.message}`)
     return { analisis: null, imagen: null, error: err.message }
   }
+}
+
+/**
+ * Últimos N puntos de retorno (más recientes primero en el texto).
+ */
+async function obtenerUltimosDatos(disp, { limit = 10 } = {}) {
+  const { registros } = await fetchHistorico12h(disp.imei, disp.link_origen || 'link1')
+  const sorted = [...registros]
+    .filter(r => r.return_air != null || r.fecha)
+    .sort((a, b) => new Date(a.fecha) - new Date(b.fecha))
+  const ultimos = sorted.slice(-Math.max(1, Math.min(30, limit)))
+  const lineas = [...ultimos].reverse().map(r => {
+    const h = fmtHora(r.fecha, { yaEsLima: true })
+    const t = r.return_air != null ? `${parseFloat(r.return_air)}°C` : 'N/A'
+    const set = r.set_point != null ? ` · set ${parseFloat(r.set_point)}°C` : ''
+    return `• ${h} — retorno ${t}${set}`
+  })
+  return { lineas, total: ultimos.length }
 }
 
 module.exports = {
@@ -226,6 +349,9 @@ module.exports = {
   analizarFueraDeRango,
   generarGrafica12h,
   analizarYGenerarGrafica,
+  resolverRangoAnalisis,
+  obtenerUltimosDatos,
   fmtHora,
+  estaFueraDeRango,
   HORAS_MINIMAS
 }

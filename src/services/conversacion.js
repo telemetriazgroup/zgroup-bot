@@ -93,17 +93,24 @@ function mensajeAckOk(usuario, ctx) {
   const nombre = nombrePila(usuario.nombre) || ''
   const equipo = ctx?.ultimo_nombre_equipo || ctx?.ultimo_imei
   if (equipo) {
-    return `Gracias${nombre ? ` ${nombre}` : ''} — dejo *${equipo}* en seguimiento. Si necesitan números, escriban *ESTADO* o *GRAFICA*.`
+    return pick([
+      `Gracias${nombre ? ` ${nombre}` : ''} — dejo *${equipo}* en seguimiento. ¿*GRAFICA*, *ULTIMOS* o *TODOS*?`,
+      `Perfecto${nombre ? ` ${nombre}` : ''} — *${equipo}* queda anotado. *Actualizar*, *gráfica* o *todos* para el menú.`,
+      `Ok${nombre ? ` ${nombre}` : ''} — seguimiento en *${equipo}*. También puedes pedir *últimos* o volver con *todos*.`
+    ])
   }
-  return `Perfecto${nombre ? ` ${nombre}` : ''} — quedo atento. Escribe *ESTADO* cuando quieras el resumen.`
+  return pick([
+    `Perfecto${nombre ? ` ${nombre}` : ''} — quedo atento. Escribe *estado* para el menú.`,
+    `Listo${nombre ? ` ${nombre}` : ''}. Cuando quieras, *hola* o *estado* y navegas tus equipos.`
+  ])
 }
 
 function mensajeAyuda() {
   return (
-    `Puedes escribirme como en el día a día:\n` +
-    `• *estado* o “cómo están los reefers”\n` +
-    `• nombre o IMEI del equipo\n` +
-    `• *gráfica* / *alertas* / *ok*\n` +
+    `Puedes navegar así:\n` +
+    `• *hola* / *estado* → menú de grupos y equipos\n` +
+    `• número de la lista o código *ZGRU…*\n` +
+    `• *gráfica* · *últimos* · *actualizar* · *todos*\n` +
     `• *silencio 2h* si no quieres avisos un rato`
   )
 }
@@ -139,16 +146,28 @@ function mensajeDetalleEquipo(d, { grupoNombre } = {}) {
   if (grupoNombre) lineas[0] += ` · ${grupoNombre}`
 
   if (r.sensorVal != null && r.setRef != null) {
-    lineas.push(
-      `${r.sensorNombre || 'Sensor'}: *${r.sensorVal} °C* · set *${r.setRef} °C* (±${r.delta ?? 5})`
-    )
+    if (r.origen === 'ztrack') {
+      lineas.push(
+        `${r.sensorNombre || 'Sensor'}: *${r.sensorVal} °C* · rango ztrack ${r.min}…${r.max} °C (set ${r.setRef})`
+      )
+    } else {
+      lineas.push(
+        `${r.sensorNombre || 'Sensor'}: *${r.sensorVal} °C* · set *${r.setRef} °C* (±${r.delta ?? 5})`
+      )
+    }
     if (r.fueraDeRango) lineas.push(`Está *fuera de rango*.`)
   } else if (d.return_air != null) {
     lineas.push(`Retorno: *${d.return_air} °C* · set ${d.set_point_live ?? 'N/A'} °C`)
   }
 
+  if (d.ultimo_dato) {
+    try {
+      const f = new Date(d.ultimo_dato).toLocaleString('es-PE', { timeZone: 'America/Lima' })
+      lineas.push(`Último dato: ${f}`)
+    } catch { /* ignore */ }
+  }
   if (d.last_ip) lineas.push(`Última IP: ${d.last_ip}`)
-  lineas.push(`¿*GRAFICA*, *ALERTAS* u *OK*?`)
+  lineas.push(`¿*GRAFICA*, *ULTIMOS*, *ACTUALIZAR* o *TODOS*?`)
   return lineas.join('\n')
 }
 
@@ -170,10 +189,26 @@ function resolverEquipoEnTexto(texto, dispositivos) {
   const n = normalizar(texto)
   if (!dispositivos?.length) return null
 
+  // Código cliente ZGRU… (prioridad sobre IMEI)
+  const zgru =
+    (n.match(/\bzgru\s*[-_]?\s*(\d{4,})\b/) || [])[0] ||
+    (n.match(/\b(zgru\d{4,})\b/) || [])[0]
+  if (zgru) {
+    const code = normalizar(zgru).replace(/\s+/g, '').replace(/[-_]/g, '')
+    const byZ = dispositivos.find(d => {
+      const nom = normalizar(d.nombre || '').replace(/[-_\s]/g, '')
+      return nom.includes(code) || code.includes(nom.slice(0, code.length))
+    })
+    if (byZ) return byZ
+  }
+
   const digits = (n.match(/\d{6,}/) || [])[0]
   if (digits) {
     const byImei = dispositivos.find(d => String(d.imei).includes(digits))
     if (byImei) return byImei
+    // También dígitos del ZGRU sin prefijo
+    const byNomDig = dispositivos.find(d => normalizar(d.nombre || '').includes(digits))
+    if (byNomDig) return byNomDig
   }
 
   let best = null
@@ -186,7 +221,6 @@ function resolverEquipoEnTexto(texto, dispositivos) {
       const score = nom.length
       if (score > bestScore) { best = d; bestScore = score }
     }
-    // tokens del nombre
     const tokens = nom.split(/[\s\-_]+/).filter(t => t.length >= 3)
     const hits = tokens.filter(t => n.includes(t)).length
     if (hits && hits * 10 > bestScore) {
@@ -215,6 +249,7 @@ module.exports = {
   setContexto,
   estaMuteado,
   nombrePila,
+  pick,
   mensajePruebaConexion,
   mensajeAvisoAlerta,
   mensajeAckOk,

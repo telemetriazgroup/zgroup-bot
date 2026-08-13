@@ -84,11 +84,11 @@ async function listarMensajes({ usuarioId, telefono, limite = 40 } = {}) {
   const where = []
   if (usuarioId) {
     params.push(usuarioId)
-    where.push(`usuario_id = $${params.length}`)
+    where.push(`m.usuario_id = $${params.length}`)
   }
   if (telefono) {
     params.push(digitos(telefono))
-    where.push(`telefono = $${params.length}`)
+    where.push(`m.telefono = $${params.length}`)
   }
   if (!where.length) {
     // Sin filtro: últimos mensajes globales (admin)

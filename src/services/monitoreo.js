@@ -1,7 +1,7 @@
 const { db } = require('../db')
 const { logger } = require('../logger')
 const { fetchLiveData, extraerTelemetria, SENSORES } = require('./live')
-const { analizarYGenerarGrafica } = require('./historico')
+const { analizarYGenerarGrafica, resolverRangoAnalisis } = require('./historico')
 const { encolarConversacion, jidDeTelefono } = require('./outbox')
 const {
   setContexto,
@@ -20,6 +20,8 @@ const {
 } = require('./alerta-seguimiento')
 
 const DELTA_DEFAULT = 5
+const WAIT_INTERNO_DEFAULT = 2
+const WAIT_USUARIO_DEFAULT = 4
 
 const TIPO_ALERTA = {
   offline: 'Dispositivo OFFLINE — sin conexión',
@@ -28,6 +30,103 @@ const TIPO_ALERTA = {
   cambio_setpoint: 'CAMBIO DE SETPOINT detectado',
   en_rango: 'Temperatura de vuelta al rango',
   online: 'Dispositivo en línea'
+}
+
+function horasSinDato(disp) {
+  if (!disp?.ultimo_dato) return Infinity
+  const t = new Date(disp.ultimo_dato).getTime()
+  if (Number.isNaN(t)) return Infinity
+  return Math.max(0, (Date.now() - t) / 3600000)
+}
+
+function umbralesWait(config) {
+  const interno = Math.max(0.5, parseFloat(config?.wait_interno_horas ?? WAIT_INTERNO_DEFAULT) || WAIT_INTERNO_DEFAULT)
+  const usuario = Math.max(interno, parseFloat(config?.wait_usuario_horas ?? WAIT_USUARIO_DEFAULT) || WAIT_USUARIO_DEFAULT)
+  return { interno, usuario }
+}
+
+/**
+ * Wait/offline: incidente interno ≥ interno h; WhatsApp usuario ≥ usuario h.
+ * Con prioridad ztrack no se avisa localmente (lo hace el monitor correo).
+ */
+async function evaluarConexionSinDatos(disp, codigo, { notificar, config }) {
+  const alertas = []
+  const horas = horasSinDato(disp)
+  const { interno, usuario } = umbralesWait(config)
+  const pendiente = await db.tieneAlertaPendiente(disp.imei, codigo)
+
+  if (horas < interno) {
+    await db.actualizarMonitoreoEstado(disp.id, { en_rango: false })
+    return {
+      online: false,
+      estado: disp.estado_conexion,
+      alertas,
+      horas_sin_dato: horas,
+      motivo: 'bajo_umbral_interno'
+    }
+  }
+
+  // Registro interno (nosotros) a partir de `interno` horas — sin WA
+  if (!pendiente) {
+    await db.registrarAlerta({
+      equipo_id: disp.imei,
+      tipo_alerta: `${TIPO_ALERTA[codigo] || codigo}: ~${horas.toFixed(1)} h sin dato (interno ≥${interno} h)`,
+      ubicacion: disp.last_ip,
+      nivel: codigo === 'offline' ? 'critico' : 'normal',
+      codigo
+    })
+    await db.registrarEventoConversacion(null, 'incidente_interno', {
+      detalle: `[interno] ${codigo} ${disp.imei} ~${horas.toFixed(1)}h (usuario ≥${usuario}h)`,
+      meta: { imei: disp.imei, codigo, horas, interno, usuario }
+    }).catch(() => {})
+    alertas.push(`${codigo}_interno`)
+    logger.info(`📝 Incidente interno ${codigo} ${disp.imei}: ${horas.toFixed(2)}h (WA usuario ≥${usuario}h)`)
+  }
+
+  // WhatsApp al cliente solo desde `usuario` horas (y sin prioridad ztrack)
+  if (notificar && !disp.prioridad_monitor && horas >= usuario) {
+    const flagKey = `alerta_${codigo}`
+    if (config?.[flagKey] !== false) {
+      const usuarios = await db.obtenerUsuariosDeEquipo(disp.imei)
+      let faltaWa = false
+      for (const u of usuarios) {
+        const s = await obtenerSeguimientoActivo(u.id, disp.imei, codigo)
+        if (!s || parseFloat(s.ultimo_umbral_horas || 0) + 0.001 < usuario) {
+          faltaWa = true
+          break
+        }
+      }
+      if (faltaWa) {
+        const r = await notificarUsuarios(
+          disp,
+          codigo,
+          async (u) => {
+            const { mensajeAvisoAlerta, codigoATextoHumano } = require('./conversacion')
+            return mensajeAvisoAlerta(u, {
+              nombreEquipo: disp.nombre || disp.imei,
+              imei: disp.imei,
+              quePaso: `lleva ~${horas.toFixed(1)} h sin datos (${codigoATextoHumano(codigo)})`,
+              datoClave: `Último dato: ${disp.ultimo_dato || 'N/A'} · aviso usuario desde ${usuario} h`
+            })
+          },
+          { nivel: codigo === 'offline' ? 'critico' : 'normal', meta: { horas, usuario } }
+        )
+        for (const u of usuarios) {
+          await upsertSeguimientoNotificado(u.id, disp.imei, codigo, usuario, { horas, origen: 'wait_local' })
+        }
+        if (r.encolados) alertas.push(codigo)
+        logger.info(`📨 WA ${codigo} ${disp.imei}: ${horas.toFixed(2)}h → ${r.encolados} usuarios`)
+      }
+    }
+  }
+
+  await db.actualizarMonitoreoEstado(disp.id, { en_rango: false })
+  return {
+    online: false,
+    estado: disp.estado_conexion,
+    alertas,
+    horas_sin_dato: horas
+  }
 }
 
 async function notificarUsuarios(disp, codigo, redactarFn, { nivel = 'normal', meta = {} } = {}) {
@@ -113,11 +212,11 @@ async function dispararAlerta(disp, codigo, { detalle, temperatura, nivel = 'nor
 }
 
 async function procesarFueraDeRango(disp, {
-  sensorVal, setRef, delta, sensorNombre, notificar, config
+  sensorVal, setRef, delta, min, max, sensorNombre, notificar, config, origenRango = 'local'
 }) {
   const umbrales = leerUmbrales(config)
-  const min = setRef - delta
-  const max = setRef + delta
+  const minB = min != null ? min : setRef - delta
+  const maxB = max != null ? max : setRef + delta
   const alertas = []
 
   // Marcar inicio del periodo fuera de rango
@@ -134,7 +233,9 @@ async function procesarFueraDeRango(disp, {
   if (!notificar) return { alertas, horasContinuas }
 
   const detalleBase =
-    `${sensorNombre}: ${sensorVal}°C | Rango: ${min}°C a ${max}°C (Set ${setRef}°C ±${delta})`
+    origenRango === 'ztrack'
+      ? `${sensorNombre}: ${sensorVal}°C | Rango ztrack: ${minB}°C a ${maxB}°C (set ${setRef}°C)`
+      : `${sensorNombre}: ${sensorVal}°C | Rango: ${minB}°C a ${maxB}°C (Set ${setRef}°C ±${delta})`
 
   let analisisHistorico = null
   if ((disp.link_origen || 'link1') === 'link1' && horasContinuas >= umbrales.minHoras) {
@@ -253,38 +354,37 @@ async function evaluarDispositivo(dispositivoId, { notificar = true } = {}) {
   if (!disp) throw new Error('Dispositivo no encontrado')
   if (!disp.alarmas_activas) return { skip: true, motivo: 'Monitoreo desactivado' }
 
-  // Prioridad ztrack: las alertas push las dispara el monitor correo (ultimasAlertasEnviadas)
+  const config = await db.obtenerConfigApi()
+  const umbrales = leerUmbrales(config)
+  const alertas = []
+
+  // ── 1. Wait/offline: interno ≥2 h siempre; WA usuario ≥4 h (sin prioridad ztrack) ──
+  if (disp.estado_conexion !== 'online') {
+    const codigo = disp.estado_conexion === 'wait' ? 'wait' : 'offline'
+    // Con prioridad ztrack: solo incidente interno (WA lo decide el monitor correo ≥4 h)
+    return evaluarConexionSinDatos(disp, codigo, {
+      notificar: notificar && !disp.prioridad_monitor,
+      config
+    })
+  }
+
+  // Prioridad ztrack: online → no push local de temp/setpoint (solo correo ztrack o prueba admin)
   if (disp.prioridad_monitor && notificar) {
     return {
       skip: true,
       motivo: 'prioridad_monitor',
       prioridad_monitor: true,
-      alertas: []
-    }
-  }
-
-  const config = await db.obtenerConfigApi()
-  const umbrales = leerUmbrales(config)
-  const alertas = []
-
-  // ── 1. Validar conexión PRIMERO ───────────────────────────
-  if (disp.estado_conexion !== 'online') {
-    const codigo = disp.estado_conexion === 'wait' ? 'wait' : 'offline'
-    const pendiente = await db.tieneAlertaPendiente(disp.imei, codigo)
-
-    if (notificar && !pendiente) {
-      const flagKey = `alerta_${codigo}`
-      if (config?.[flagKey] !== false) {
-        const r = await dispararAlerta(disp, codigo, {
-          detalle: `Estado: ${disp.estado_conexion.toUpperCase()}. Último dato: ${disp.ultimo_dato || 'N/A'}`,
-          nivel: codigo === 'offline' ? 'critico' : 'normal'
-        })
-        if (r) alertas.push(codigo)
+      alertas_locales_suprimidas: true,
+      mensaje:
+        'Alertas locales de temperatura/setpoint suprimidas: este IMEI usa prioridad ztrack. Wait/sin datos: interno local + WA desde umbral usuario vía monitor correo.',
+      alertas: [],
+      ztrack: {
+        en_rango: disp.ztrack_en_rango,
+        estado: disp.ztrack_estado,
+        criterio: disp.ztrack_criterio,
+        actualizado_en: disp.ztrack_actualizado_en
       }
     }
-
-    await db.actualizarMonitoreoEstado(disp.id, { en_rango: false })
-    return { online: false, estado: disp.estado_conexion, alertas }
   }
 
   // ── 2. Online → telemetría live ───────────────────────────
@@ -320,11 +420,19 @@ async function evaluarDispositivo(dispositivoId, { notificar = true } = {}) {
     }
   }
 
-  const setRef = disp.set_control != null ? parseFloat(disp.set_control) : telem.set_point_live
-  const delta = disp.delta != null ? parseFloat(disp.delta) : DELTA_DEFAULT
   const sensorKey = disp.sensor_control || 'return_air'
   const sensorVal = ultimo[sensorKey]
   const sensorNombre = SENSORES[sensorKey] || sensorKey
+  const rangoEf = resolverRangoAnalisis(disp, {
+    setRef: disp.set_control != null ? parseFloat(disp.set_control) : telem.set_point_live,
+    delta: disp.delta != null ? parseFloat(disp.delta) : DELTA_DEFAULT
+  })
+  const setRef = rangoEf.setControl != null
+    ? rangoEf.setControl
+    : (disp.set_control != null ? parseFloat(disp.set_control) : telem.set_point_live)
+  const delta = rangoEf.delta != null ? rangoEf.delta : DELTA_DEFAULT
+  const minR = rangoEf.min
+  const maxR = rangoEf.max
 
   // ── 3. Cambio setpoint ────────────────────────────────────
   if (disp.set_control != null && disp.alerta_setpoint !== false && telem.set_point_live != null) {
@@ -347,13 +455,21 @@ async function evaluarDispositivo(dispositivoId, { notificar = true } = {}) {
     await db.actualizarUltimoSetPoint(disp.id, parseFloat(telem.set_point_live))
   }
 
-  // ── 4. Fuera / en rango con umbrales y reavisos ───────────
-  if (sensorVal != null && setRef != null) {
-    const dentroRango = sensorVal >= (setRef - delta) && sensorVal <= (setRef + delta)
+  // ── 4. Fuera / en rango (banda ztrack o local) ────────────
+  if (sensorVal != null && minR != null && maxR != null) {
+    const dentroRango = sensorVal >= minR && sensorVal <= maxR
 
     if (!dentroRango) {
       const r = await procesarFueraDeRango(disp, {
-        sensorVal, setRef, delta, sensorNombre, notificar, config
+        sensorVal,
+        setRef,
+        delta,
+        min: minR,
+        max: maxR,
+        sensorNombre,
+        notificar,
+        config,
+        origenRango: rangoEf.origen
       })
       alertas.push(...(r.alertas || []))
     } else {
@@ -374,8 +490,16 @@ async function evaluarDispositivo(dispositivoId, { notificar = true } = {}) {
     online: true,
     alertas,
     telemetria: telem,
-    rango: setRef != null
-      ? { set: setRef, delta, min: setRef - delta, max: setRef + delta, sensor: sensorNombre, valor: sensorVal }
+    rango: minR != null
+      ? {
+          set: setRef,
+          delta,
+          min: minR,
+          max: maxR,
+          sensor: sensorNombre,
+          valor: sensorVal,
+          origen: rangoEf.origen
+        }
       : null
   }
 }
@@ -423,19 +547,50 @@ async function obtenerLiveDispositivo(dispositivoId) {
 
   const setRef = disp.set_control != null ? parseFloat(disp.set_control) : (disp.set_point_live ?? live?.ultimo?.set_point)
   const delta = disp.delta != null ? parseFloat(disp.delta) : DELTA_DEFAULT
+  const rangoLocal = setRef != null ? {
+    origen: 'local',
+    set: setRef,
+    delta,
+    min: setRef - delta,
+    max: setRef + delta,
+    sensor: SENSORES[disp.sensor_control || 'return_air'] || (disp.sensor_control || 'return_air')
+  } : null
+
+  const zr = disp.ztrack_rango && typeof disp.ztrack_rango === 'object' ? disp.ztrack_rango : null
+  const rangoZtrack = zr && (zr.setPoint != null || zr.min != null)
+    ? {
+        origen: 'ztrack',
+        set: zr.setPoint,
+        min: zr.min,
+        max: zr.max,
+        margenInferior: zr.margenInferior,
+        margenSuperior: zr.margenSuperior,
+        metricaGuia: zr.metricaGuia || 'return_air',
+        personalizado: zr.personalizado
+      }
+    : null
 
   return {
     dispositivo: disp,
     live: live?.ultimo || null,
     sensores,
     error,
-    rango: setRef != null ? {
-      set: setRef,
-      delta,
-      min: setRef - delta,
-      max: setRef + delta,
-      sensor: SENSORES[disp.sensor_control || 'return_air']
-    } : null,
+    rango: rangoLocal,
+    rango_local: rangoLocal,
+    rango_ztrack: rangoZtrack,
+    ztrack: {
+      vinculado: !!(disp.monitor_row_key || disp.prioridad_monitor),
+      prioridad: !!disp.prioridad_monitor,
+      alertas_locales_suprimidas: !!disp.prioridad_monitor,
+      grupo: disp.monitor_grupo || null,
+      en_rango: disp.ztrack_en_rango,
+      estado: disp.ztrack_estado,
+      criterio: disp.ztrack_criterio,
+      umbrales: disp.ztrack_umbrales,
+      telemetria: disp.ztrack_telemetria,
+      episodio: disp.ztrack_episodio,
+      actualizado_en: disp.ztrack_actualizado_en
+    },
     referencia: live?.referencia_servidor
   }
 }

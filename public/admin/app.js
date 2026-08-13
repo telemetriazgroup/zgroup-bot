@@ -97,6 +97,24 @@ function badgeEstado(e) {
   return `<span class="badge ${cls[e] || ''}">${e || '—'}</span>`
 }
 
+function fmtRangosDispCell(d) {
+  if (!d.prioridad_monitor && !d.ztrack_rango) return ''
+  const zr = typeof d.ztrack_rango === 'string' ? safeJson(d.ztrack_rango) : d.ztrack_rango
+  const local = (d.set_control != null)
+    ? `loc set ${d.set_control}±${d.delta ?? 5}`
+    : 'loc (auto)'
+  const zt = zr && zr.setPoint != null
+    ? `zt ${zr.min}…${zr.max} (set ${zr.setPoint})`
+    : (d.monitor_row_key ? 'zt sin rango' : '')
+  if (!zt && !d.prioridad_monitor) return ''
+  const enR = d.ztrack_en_rango === true ? '✓' : d.ztrack_en_rango === false ? '✗' : '?'
+  return `<div class="hint" style="margin-top:4px;font-size:0.75rem">${d.prioridad_monitor ? `<span style="color:var(--yellow)">local OFF</span> · ` : ''}${zt || '—'} · ${local}${d.ztrack_en_rango != null ? ` · ${enR}` : ''}</div>`
+}
+
+function safeJson(s) {
+  try { return JSON.parse(s) } catch { return null }
+}
+
 function cerrarModal(id) { document.getElementById(id).classList.add('hidden') }
 
 // ── Dashboard ───────────────────────────────────────────────
@@ -176,8 +194,8 @@ function renderDispositivos() {
             <span class="slider"></span>
           </label>
         </td>
-        <td><code>${d.imei}</code>${d.prioridad_monitor ? ' <span class="badge badge-ok" title="Prioridad ztrack">ztrack</span>' : (d.monitor_row_key ? ' <span class="badge badge-off" title="En monitor correo, prioridad OFF">correo</span>' : '')}</td>
-        <td>${d.nombre || '<span style="color:var(--muted)">Sin nombre</span>'}</td>
+        <td><code>${d.imei}</code>${d.prioridad_monitor ? ' <span class="badge badge-ok" title="Prioridad ztrack — alertas locales OFF">ztrack</span>' : (d.monitor_row_key ? ' <span class="badge badge-off" title="En monitor correo, prioridad OFF">correo</span>' : '')}</td>
+        <td>${d.nombre || '<span style="color:var(--muted)">Sin nombre</span>'}${fmtRangosDispCell(d)}</td>
         <td>${badgeEstado(d.estado_conexion)}</td>
         <td>${d.total_usuarios > 0
           ? `<span class="badge badge-ok">${d.total_usuarios}</span>`
@@ -308,9 +326,11 @@ async function cargarLiveControl(id) {
     const prioHint = document.getElementById('control-prioridad-hint')
     if (prioHint) {
       prioHint.textContent = d.monitor_row_key
-        ? `En monitor correo (${d.monitor_grupo || d.monitor_row_key}). ON = WA desde alertas ztrack (1× por umbral). OFF = lógica local.`
+        ? `En monitor correo (${d.monitor_grupo || d.monitor_row_key}). ON = WA solo tras correo ztrack (umbrales API). OFF = lógica local.`
         : 'Este IMEI aún no aparece en el monitor correo ztrack. La prioridad se activa sola la primera vez que coincida.'
     }
+
+    pintarPanelZtrackControl(data)
 
     const grid = document.getElementById('control-sensores')
     const sensores = data.sensores.length ? data.sensores : [
@@ -339,12 +359,90 @@ async function cargarLiveControl(id) {
     const rangoEl = document.getElementById('control-rango-info')
     if (data.rango) {
       const r = data.rango
-      rangoEl.textContent = `Rango válido (${r.sensor}): ${r.min}°C a ${r.max}°C · Set ${r.set}°C ±${r.delta}°C`
+      rangoEl.textContent = `Rango local (${r.sensor}): ${r.min}°C a ${r.max}°C · Set ${r.set}°C ±${r.delta}°C` +
+        (d.prioridad_monitor ? ' — NO se usa para avisar (prioridad ztrack)' : '')
     } else {
-      rangoEl.textContent = 'Configure set/delta o espere datos live para ver el rango.'
+      rangoEl.textContent = 'Configure set/delta o espere datos live para ver el rango local.'
     }
     await cargarProcesoCa(id)
   } catch (err) { toast(err.message, 'error') }
+}
+
+function pintarPanelZtrackControl(data) {
+  const panel = document.getElementById('control-ztrack-panel')
+  if (!panel) return
+  const z = data.ztrack || {}
+  const d = data.dispositivo || {}
+  const show = !!(z.vinculado || d.monitor_row_key || d.prioridad_monitor || data.rango_ztrack)
+  panel.classList.toggle('hidden', !show)
+  if (!show) return
+
+  const aviso = document.getElementById('control-ztrack-aviso')
+  if (aviso) {
+    aviso.textContent = z.prioridad || d.prioridad_monitor
+      ? 'Alertas locales SUPRIMIDAS. Una anomalía local (p. ej. 5 min fuera) no avisa al usuario. Solo WhatsApp cuando ztrack envía correo, o prueba manual del admin.'
+      : 'Vinculado al monitor correo pero prioridad OFF: se usa lógica local para avisar.'
+  }
+
+  const rz = data.rango_ztrack
+  const elZ = document.getElementById('control-rango-ztrack')
+  if (elZ) {
+    elZ.innerHTML = rz
+      ? `set <strong>${rz.set}</strong> · ${rz.min}…${rz.max} °C` +
+        (rz.margenInferior != null ? `<br>márgen −${rz.margenInferior} / +${rz.margenSuperior}` : '') +
+        (rz.metricaGuia ? `<br>métrica ${rz.metricaGuia}` : '') +
+        (Array.isArray(d.ztrack_umbrales) ? `<br>umbrales: ${d.ztrack_umbrales.slice(0, 8).join(', ')}${d.ztrack_umbrales.length > 8 ? '…' : ''}` : '')
+      : '<span style="color:var(--muted)">Sin rango programado en ztrack</span>'
+  }
+
+  const rl = data.rango_local || data.rango
+  const elL = document.getElementById('control-rango-local')
+  if (elL) {
+    elL.innerHTML = rl
+      ? `set <strong>${rl.set}</strong> · ${rl.min}…${rl.max} °C (±${rl.delta})` +
+        (rl.sensor ? `<br>sensor ${rl.sensor}` : '') +
+        (d.prioridad_monitor ? '<br><span style="color:var(--yellow)">suprimido para WA</span>' : '')
+      : 'Sin set/delta local configurado'
+  }
+
+  const est = document.getElementById('control-ztrack-estado')
+  if (est) {
+    const badge = z.en_rango === true
+      ? '<span class="badge badge-ok">en rango</span>'
+      : z.en_rango === false
+        ? '<span class="badge badge-off">fuera</span>'
+        : '<span class="badge">n/d</span>'
+    est.innerHTML =
+      `${badge} · estado <code>${escHtml(z.estado || '—')}</code>` +
+      (z.actualizado_en ? ` · act. ${fmtFecha(z.actualizado_en)}` : '') +
+      (z.criterio ? `<br>${escHtml(String(z.criterio).slice(0, 180))}${String(z.criterio).length > 180 ? '…' : ''}` : '')
+  }
+}
+
+async function cargarHistorialZtrackControl() {
+  if (!controlDispId) return
+  const box = document.getElementById('control-ztrack-hist')
+  if (!box) return
+  box.classList.remove('hidden')
+  box.textContent = 'Cargando…'
+  try {
+    const r = await api(`/dispositivos/${controlDispId}/ztrack-historial?limit=24`)
+    const rows = r.historial || []
+    if (!rows.length) {
+      box.textContent = 'Sin historial aún (se llena en cada poll del monitor).'
+      return
+    }
+    box.innerHTML = `<table style="width:100%"><thead><tr><th>Cuando</th><th>Rango</th><th>Estado</th></tr></thead><tbody>` +
+      rows.map(h => {
+        const rg = h.rango
+        const rangoTxt = rg && rg.setPoint != null ? `${rg.min}…${rg.max}` : '—'
+        const er = h.en_rango === true ? '✓' : h.en_rango === false ? '✗' : '?'
+        return `<tr><td>${fmtFecha(h.consultado_en)}</td><td>${er} ${rangoTxt}</td><td>${escHtml(h.estado || '—')}</td></tr>`
+      }).join('') +
+      `</tbody></table>`
+  } catch (err) {
+    box.textContent = err.message
+  }
 }
 
 function refrescarLiveControl() {
@@ -379,8 +477,10 @@ async function guardarMonitoreo(e) {
 async function evaluarAhora() {
   if (!controlDispId) return
   try {
-    const r = await api(`/dispositivos/${controlDispId}/evaluar`, { method: 'POST' })
-    if (r.online === false) {
+    const r = await api(`/dispositivos/${controlDispId}/evaluar`, { method: 'POST', body: '{}' })
+    if (r.alertas_locales_suprimidas || r.motivo === 'prioridad_monitor') {
+      toast(r.mensaje || 'Prioridad ztrack: no se envían alertas locales', 'success')
+    } else if (r.online === false) {
       toast(`Dispositivo ${r.estado}. Alertas: ${(r.alertas || []).join(', ') || 'ninguna'}`, r.alertas?.length ? 'error' : 'success')
     } else if (r.alertas?.length) {
       toast(`Alertas generadas: ${r.alertas.join(', ')}`, 'error')
@@ -1253,6 +1353,10 @@ async function cargarConfig() {
     document.getElementById('cfg-alerta-online').checked = cfg.alerta_online
     document.getElementById('cfg-alerta-wait').checked = cfg.alerta_wait
     document.getElementById('cfg-alerta-offline').checked = cfg.alerta_offline
+    const wInt = document.getElementById('cfg-wait-interno')
+    if (wInt) wInt.value = cfg.wait_interno_horas ?? 2
+    const wUsr = document.getElementById('cfg-wait-usuario')
+    if (wUsr) wUsr.value = cfg.wait_usuario_horas ?? 4
     const fueraMin = document.getElementById('cfg-fuera-min')
     if (fueraMin) fueraMin.value = String(cfg.fuera_rango_minutos_min || 120)
     const paso = document.getElementById('cfg-reaviso-paso')
@@ -1321,6 +1425,8 @@ async function guardarConfig(e) {
     alerta_online: document.getElementById('cfg-alerta-online').checked,
     alerta_wait: document.getElementById('cfg-alerta-wait').checked,
     alerta_offline: document.getElementById('cfg-alerta-offline').checked,
+    wait_interno_horas: parseFloat(document.getElementById('cfg-wait-interno')?.value || '2'),
+    wait_usuario_horas: parseFloat(document.getElementById('cfg-wait-usuario')?.value || '4'),
     fuera_rango_minutos_min: parseInt(document.getElementById('cfg-fuera-min')?.value || '120', 10),
     reaviso_paso_horas: parseFloat(document.getElementById('cfg-reaviso-paso')?.value || '1'),
     reaviso_max_horas_dia: parseFloat(document.getElementById('cfg-reaviso-max')?.value || '20'),

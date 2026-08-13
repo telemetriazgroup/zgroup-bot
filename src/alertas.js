@@ -7,7 +7,8 @@ const {
   sincronizarMonitorExterno,
   listarConsultasMonitor,
   obtenerConsultaMonitor,
-  obtenerEstadoMonitorUi
+  obtenerEstadoMonitorUi,
+  listarHistorialZtrack
 } = require('./services/monitor-externo')
 const { exportarDatos, importarDatos, DEFAULT_OPTS } = require('./services/datos-transfer')
 const { enviarTestEstadoUsuario, enviarTestEstadoMultiples } = require('./services/estado')
@@ -341,8 +342,11 @@ router.put('/dispositivos/:id/monitoreo', async (req, res) => {
   try {
     const id = parseInt(req.params.id)
     const disp = await db.actualizarMonitoreoConfig(id, req.body)
+    const notificar = req.body.notificar === true
+      ? true
+      : (disp.prioridad_monitor ? false : req.body.evaluar !== false)
     const evaluacion = req.body.evaluar !== false
-      ? await evaluarDispositivo(id, { notificar: true })
+      ? await evaluarDispositivo(id, { notificar })
       : null
     res.json({ dispositivo: disp, evaluacion })
   } catch (err) { res.status(500).json({ error: err.message }) }
@@ -376,8 +380,37 @@ router.put('/dispositivos/:id/proceso-ca', async (req, res) => {
 
 router.post('/dispositivos/:id/evaluar', async (req, res) => {
   try {
-    const resultado = await evaluarDispositivo(parseInt(req.params.id), { notificar: true })
+    const id = parseInt(req.params.id)
+    const disp = await db.obtenerDispositivoPorId(id)
+    if (!disp) return res.status(404).json({ error: 'Dispositivo no encontrado' })
+    // Con prioridad ztrack no se notifica por evaluación local (salvo forzar_wa)
+    const notificar = req.body?.forzar_wa === true || !disp.prioridad_monitor
+    const resultado = await evaluarDispositivo(id, { notificar })
     res.json({ ok: true, ...resultado })
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
+router.get('/dispositivos/:id/ztrack-historial', async (req, res) => {
+  try {
+    const disp = await db.obtenerDispositivoPorId(parseInt(req.params.id))
+    if (!disp) return res.status(404).json({ error: 'Dispositivo no encontrado' })
+    const historial = await listarHistorialZtrack(disp.imei, { limit: req.query.limit })
+    res.json({
+      imei: disp.imei,
+      prioridad_monitor: !!disp.prioridad_monitor,
+      ztrack_actual: {
+        rango: disp.ztrack_rango,
+        umbrales: disp.ztrack_umbrales,
+        en_rango: disp.ztrack_en_rango,
+        estado: disp.ztrack_estado,
+        criterio: disp.ztrack_criterio,
+        telemetria: disp.ztrack_telemetria,
+        episodio: disp.ztrack_episodio,
+        actualizado_en: disp.ztrack_actualizado_en,
+        grupo: disp.monitor_grupo
+      },
+      historial
+    })
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 

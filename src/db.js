@@ -578,6 +578,8 @@ const db = {
         monitor_externo_url = COALESCE($14, monitor_externo_url),
         monitor_externo_minutos = COALESCE($15, monitor_externo_minutos),
         monitor_externo_activo = COALESCE($16, monitor_externo_activo),
+        wait_interno_horas = COALESCE($17, wait_interno_horas),
+        wait_usuario_horas = COALESCE($18, wait_usuario_horas),
         actualizado_en = NOW()
       WHERE id = 1 RETURNING *
     `, [
@@ -591,7 +593,9 @@ const db = {
       data.historico_fecha_ya_lima,
       data.monitor_externo_url,
       data.monitor_externo_minutos,
-      data.monitor_externo_activo
+      data.monitor_externo_activo,
+      data.wait_interno_horas,
+      data.wait_usuario_horas
     ])
     return rows[0]
   },

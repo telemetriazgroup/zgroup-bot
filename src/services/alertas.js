@@ -131,9 +131,18 @@ async function procesarCambiosEstado(cambios) {
     // online: no push por defecto (anti-spam)
     if (nuevoEstado === 'online') continue
 
+    // wait/offline: lo evalúa monitorearDispositivosActivos
+    // (interno ≥2 h, usuario WA ≥4 h). Evita avisar al cambio inmediato (~1–2 h).
+    if (nuevoEstado === 'wait' || nuevoEstado === 'offline') {
+      continue
+    }
+
     const flagConfig = config[`alerta_${nuevoEstado}`]
     const cfgTipo = mapConfig[nuevoEstado]
     if (!flagConfig || !cfgTipo?.activo) continue
+
+    // Prioridad ztrack: no alertas locales por cambio de estado
+    if (c.dispositivo?.prioridad_monitor) continue
 
     const alerta = await db.registrarAlerta({
       equipo_id: c.imei,

@@ -38,13 +38,36 @@ async function enriquecerDispositivo(disp) {
 }
 
 function calcularRango(d) {
-  const delta = d.delta != null ? parseFloat(d.delta) : DELTA_DEFAULT
-  const setRef = d.set_control != null ? parseFloat(d.set_control) : d.set_point_live
   const sensorKey = d.sensor_control || 'return_air'
   const sensorVal = d[sensorKey] ?? d.return_air
   const sensorNombre = SENSORES[sensorKey] || sensorKey
+  const zr = d.ztrack_rango && typeof d.ztrack_rango === 'object' ? d.ztrack_rango : null
+
+  // Prioridad ztrack: banda de la API (min/max), no set±delta local
+  if (d.prioridad_monitor && zr && zr.min != null && zr.max != null) {
+    const min = parseFloat(zr.min)
+    const max = parseFloat(zr.max)
+    const setRef = zr.setPoint != null ? parseFloat(zr.setPoint) : (min + max) / 2
+    const delta = Math.max(Math.abs(setRef - min), Math.abs(max - setRef))
+    const fueraLive = sensorVal != null && (sensorVal < min || sensorVal > max)
+    const alertaFuera = d.alertas_pendientes?.some(a => a.codigo === 'fuera_de_rango')
+    return {
+      fueraDeRango: d.ztrack_en_rango === false || alertaFuera || fueraLive,
+      setRef,
+      delta,
+      min,
+      max,
+      sensorVal,
+      sensorNombre,
+      alertaFuera,
+      origen: 'ztrack'
+    }
+  }
+
+  const delta = d.delta != null ? parseFloat(d.delta) : DELTA_DEFAULT
+  const setRef = d.set_control != null ? parseFloat(d.set_control) : d.set_point_live
   if (setRef == null || sensorVal == null) {
-    return { fueraDeRango: d.en_rango === false, setRef, delta, sensorVal, sensorNombre }
+    return { fueraDeRango: d.en_rango === false, setRef, delta, sensorVal, sensorNombre, origen: 'local' }
   }
 
   const min = setRef - delta
@@ -53,7 +76,8 @@ function calcularRango(d) {
   const alertaFuera = d.alertas_pendientes?.some(a => a.codigo === 'fuera_de_rango')
   return {
     fueraDeRango: d.en_rango === false || alertaFuera || fueraLive,
-    setRef, delta, min, max, sensorVal, sensorNombre, alertaFuera
+    setRef, delta, min, max, sensorVal, sensorNombre, alertaFuera,
+    origen: 'local'
   }
 }
 
@@ -160,7 +184,9 @@ function formatearBloqueAnalisis12h(d, analisis) {
   let bloque = ''
   if (analisis.mensajeHoras) bloque += `\n🔴 *${analisis.mensajeHoras}*\n`
   if (r.sensorNombre && r.sensorVal != null && r.setRef != null) {
-    bloque += `📋 ${r.sensorNombre}: ${r.sensorVal}°C | Rango: ${r.min}°C a ${r.max}°C (Set ${r.setRef}°C ±${r.delta})\n`
+    bloque += r.origen === 'ztrack'
+      ? `📋 ${r.sensorNombre}: ${r.sensorVal}°C | Rango ztrack: ${r.min}°C a ${r.max}°C (set ${r.setRef}°C)\n`
+      : `📋 ${r.sensorNombre}: ${r.sensorVal}°C | Rango: ${r.min}°C a ${r.max}°C (Set ${r.setRef}°C ±${r.delta})\n`
   }
   return bloque
 }

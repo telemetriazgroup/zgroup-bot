@@ -404,10 +404,19 @@ async function backfillUmbralesDesdeEnvios() {
 }
 
 /**
- * Sincroniza metadata del monitor correo.
+ * Sincroniza metadata + contexto ztrack (rangos, estado, telemetría).
  * NO pisa prioridad_monitor=false: solo la activa la primera vez que aparece en el API.
  */
-async function syncMetadataPrioridad(disp, eq) {
+async function persistirContextoZtrack(disp, eq, { consultaId = null } = {}) {
+  const resumen = resumirEquipo(eq)
+  const rango = resumen.rangoProgramado
+  const umbrales = resumen.umbralesHoras
+  const enRango = resumen.enRango
+  const estado = resumen.ultimaEvaluacion?.estado || null
+  const criterio = resumen.ultimaEvaluacion?.criterio || null
+  const telem = resumen.telemetria
+  const epi = resumen.episodioActivo
+
   await pool.query(
     `UPDATE dispositivos SET
        prioridad_monitor = CASE
@@ -419,20 +428,83 @@ async function syncMetadataPrioridad(disp, eq) {
        nombre = CASE
          WHEN nombre IS NULL OR nombre = imei OR nombre = '' THEN $4
          ELSE nombre
-       END
+       END,
+       ztrack_rango = $5::jsonb,
+       ztrack_umbrales = $6::jsonb,
+       ztrack_en_rango = $7,
+       ztrack_estado = $8,
+       ztrack_criterio = $9,
+       ztrack_telemetria = $10::jsonb,
+       ztrack_episodio = $11::jsonb,
+       ztrack_actualizado_en = NOW()
      WHERE id = $1`,
     [
       disp.id,
       eq.rowKey || null,
       eq.grupoNombre || null,
-      eq.nombrePlataforma || eq.descripcionEquipo || disp.nombre || disp.imei
+      eq.nombrePlataforma || eq.descripcionEquipo || disp.nombre || disp.imei,
+      JSON.stringify(rango),
+      JSON.stringify(umbrales),
+      enRango,
+      estado,
+      criterio,
+      JSON.stringify(telem),
+      JSON.stringify(epi)
     ]
   )
+
+  await pool.query(
+    `INSERT INTO dispositivo_ztrack_historial
+       (imei, en_rango, estado, criterio, rango, umbrales, telemetria, episodio, consulta_id)
+     VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb,$8::jsonb,$9)`,
+    [
+      String(eq.imei),
+      enRango,
+      estado,
+      criterio,
+      JSON.stringify(rango),
+      JSON.stringify(umbrales),
+      JSON.stringify(telem),
+      JSON.stringify(epi),
+      consultaId
+    ]
+  )
+
+  // Retención ~48 h por IMEI (o 300 muestras)
+  await pool.query(
+    `DELETE FROM dispositivo_ztrack_historial
+     WHERE imei = $1 AND id NOT IN (
+       SELECT id FROM dispositivo_ztrack_historial
+       WHERE imei = $1
+       ORDER BY consultado_en DESC
+       LIMIT 300
+     )`,
+    [String(eq.imei)]
+  )
+
   const { rows } = await pool.query(
     'SELECT prioridad_monitor FROM dispositivos WHERE id = $1',
     [disp.id]
   )
   return rows[0]?.prioridad_monitor === true
+}
+
+async function listarHistorialZtrack(imei, { limit = 48 } = {}) {
+  const lim = Math.min(300, Math.max(1, parseInt(limit, 10) || 48))
+  const { rows } = await pool.query(
+    `SELECT id, imei, consultado_en, en_rango, estado, criterio, rango, umbrales, telemetria, episodio
+     FROM dispositivo_ztrack_historial
+     WHERE imei = $1
+     ORDER BY consultado_en DESC
+     LIMIT $2`,
+    [String(imei), lim]
+  )
+  return rows
+}
+
+/** @deprecated use persistirContextoZtrack */
+async function syncMetadataPrioridad(disp, eq) {
+  return persistirContextoZtrack(disp, eq)
 }
 
 function redactarDesdeMonitor(usuario, {
@@ -592,6 +664,57 @@ async function procesarUltimasAlertas(ultimas, mapLocal, { bootstrap = false } =
 
     const codigo = mapCodigoInterno(kind)
     const horas = horasDeEnvio(envio)
+    const umbralNum = Number(umbralKey) || 0
+
+    // Sin datos / fuera de línea: interno desde wait_interno; WA cliente desde wait_usuario (def. 4 h)
+    const esSinDatos = codigo === 'fuera_linea'
+    if (esSinDatos) {
+      const cfgApi = await db.obtenerConfigApi().catch(() => null)
+      const waitInterno = Math.max(0.5, parseFloat(cfgApi?.wait_interno_horas ?? 2) || 2)
+      const waitUsuario = Math.max(waitInterno, parseFloat(cfgApi?.wait_usuario_horas ?? 4) || 4)
+
+      if (umbralNum + 0.001 < waitUsuario) {
+        await db.registrarAlerta({
+          equipo_id: disp.imei,
+          tipo_alerta:
+            `Monitor ztrack (${kind}): ~${umbralNum} h sin datos (interno ≥${waitInterno} h; WA usuario ≥${waitUsuario} h)`,
+          ubicacion: null,
+          nivel: 'normal',
+          codigo: 'wait'
+        })
+        await db.registrarEventoConversacion(null, 'incidente_interno', {
+          detalle: `[ztrack-interno] ${kind} ${disp.imei} umbral=${umbralNum}h (WA ≥${waitUsuario}h)`,
+          meta: {
+            imei: disp.imei,
+            kind,
+            umbral: umbralNum,
+            waitInterno,
+            waitUsuario,
+            envioId: envio.id
+          }
+        }).catch(() => {})
+        await registrarUmbralNotificado(envio.imei, kind, umbralKey, envio.id, dia)
+        await marcarEnvioProcesado(envio, {
+          notificado: false,
+          motivo: 'interno_sin_wa_umbral_bajo'
+        })
+        yaEnCiclo.add(claveUmbral)
+        resultados.push({
+          envio_id: envio.id,
+          imei: envio.imei,
+          kind,
+          umbral: umbralKey,
+          encolados: 0,
+          bloqueados: 0,
+          solo_interno: true
+        })
+        logger.info(
+          `📝 Monitor ztrack interno ${envio.imei} ${kind} umbral=${umbralKey} (WA usuario ≥${waitUsuario}h)`
+        )
+        continue
+      }
+    }
+
     const muestra = envio.muestrasUsadas?.puntos?.[0] || null
     const telemetria = muestra
       ? {
@@ -638,16 +761,24 @@ async function procesarUltimasAlertas(ultimas, mapLocal, { bootstrap = false } =
   return resultados
 }
 
-async function sincronizarMetadata(equipos, mapLocal) {
+async function sincronizarMetadata(equipos, mapLocal, { consultaId = null } = {}) {
   let enApi = 0
   let conPrioridad = 0
   for (const eq of equipos || []) {
     if (!eq?.imei) continue
-    const disp = mapLocal.get(String(eq.imei))
-    if (!disp) continue
+    let disp = mapLocal.get(String(eq.imei))
+    if (!disp) {
+      // También vincular IMEIs locales aunque no tengan alarmas_activas aún
+      const { rows } = await pool.query(
+        'SELECT * FROM dispositivos WHERE imei = $1 LIMIT 1',
+        [String(eq.imei)]
+      )
+      disp = rows[0]
+      if (!disp) continue
+      mapLocal.set(String(eq.imei), disp)
+    }
     enApi++
-    const activa = await syncMetadataPrioridad(disp, eq)
-    // refrescar flag en memoria
+    const activa = await persistirContextoZtrack(disp, eq, { consultaId })
     disp.prioridad_monitor = activa
     if (activa) conPrioridad++
   }
@@ -688,8 +819,22 @@ async function sincronizarMonitorExterno() {
 
   await backfillUmbralesDesdeEnvios()
 
-  const locales = await db.listarDispositivosMonitoreo()
-  const mapLocal = new Map(locales.map(d => [String(d.imei), d]))
+  // Mapa de todos los IMEIs locales que aparecen en el monitor (no solo alarmas_activas)
+  const imeisApi = (data.equiposProgramados || []).map(e => String(e.imei)).filter(Boolean)
+  let locales = []
+  if (imeisApi.length) {
+    const { rows } = await pool.query(
+      'SELECT * FROM dispositivos WHERE imei = ANY($1::text[])',
+      [imeisApi]
+    )
+    locales = rows
+  }
+  // Para WA solo alarmas activas
+  const conAlarma = await db.listarDispositivosMonitoreo()
+  const mapLocal = new Map([
+    ...locales.map(d => [String(d.imei), d]),
+    ...conAlarma.map(d => [String(d.imei), d])
+  ])
 
   const equipos = data.equiposProgramados || []
   const meta = await sincronizarMetadata(equipos, mapLocal)
@@ -705,7 +850,11 @@ async function sincronizarMonitorExterno() {
     if (bootstrap) {
       logger.info('🛰️ Monitor ztrack: bootstrap — marcando envíos/umbrales existentes sin WA')
     }
-    fromEnvios = await procesarUltimasAlertas(data.ultimasAlertasEnviadas || [], mapLocal, {
+    // Solo notificar a dispositivos con alarmas + prioridad
+    const mapWa = new Map(
+      [...mapLocal.entries()].filter(([, d]) => d.alarmas_activas && d.prioridad_monitor)
+    )
+    fromEnvios = await procesarUltimasAlertas(data.ultimasAlertasEnviadas || [], mapWa, {
       bootstrap
     })
   }
@@ -782,5 +931,7 @@ module.exports = {
   listarConsultasMonitor,
   obtenerConsultaMonitor,
   obtenerUltimaConsultaMonitor,
-  obtenerEstadoMonitorUi
+  obtenerEstadoMonitorUi,
+  listarHistorialZtrack,
+  resumirEquipo
 }

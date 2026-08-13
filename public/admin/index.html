@@ -501,6 +501,17 @@
               <div class="form-check"><input type="checkbox" id="cfg-alerta-wait"><label for="cfg-alerta-wait">Alertar wait</label></div>
               <div class="form-check"><input type="checkbox" id="cfg-alerta-offline"><label for="cfg-alerta-offline">Alertar offline</label></div>
             </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>Wait: registro interno (horas)</label>
+                <input type="number" step="0.5" min="0.5" id="cfg-wait-interno" value="2">
+              </div>
+              <div class="form-group">
+                <label>Wait: avisar usuario WA (horas)</label>
+                <input type="number" step="0.5" min="1" id="cfg-wait-usuario" value="4">
+              </div>
+            </div>
+            <p class="hint">Sin datos: a las 2 h se registra el incidente internamente; el cliente solo recibe WhatsApp desde las 4 h (salvo prioridad ztrack).</p>
             <hr style="margin:16px 0;border:none;border-top:1px solid var(--border)">
             <h4 style="margin:0 0 10px;font-size:0.95rem">Fuera de rango / reavisos</h4>
             <div class="form-row">
@@ -732,8 +743,26 @@
         <label for="control-prioridad-monitor">Prioridad monitor correo ztrack</label>
       </div>
       <p class="hint" id="control-prioridad-hint" style="margin-top:-4px;margin-bottom:8px">
-        ON: WhatsApp solo cuando ztrack genera una alerta nueva (apagado 2h, 3h…). OFF: lógica local original.
+        ON: WhatsApp solo cuando ztrack genera una alerta nueva (apagado 2h, 3h…). OFF: lógica local.
       </p>
+
+      <div id="control-ztrack-panel" class="card-panel hidden" style="margin-bottom:16px;border-color:var(--accent)">
+        <h3 style="margin:0 0 8px">🛰️ Rangos ztrack vs local</h3>
+        <p id="control-ztrack-aviso" class="hint" style="margin-bottom:10px;color:var(--yellow)"></p>
+        <div class="form-row" style="grid-template-columns:1fr 1fr;gap:12px">
+          <div>
+            <strong>Rango ztrack (API)</strong>
+            <div id="control-rango-ztrack" class="hint" style="margin-top:6px">—</div>
+          </div>
+          <div>
+            <strong>Rango local (config)</strong>
+            <div id="control-rango-local" class="hint" style="margin-top:6px">—</div>
+          </div>
+        </div>
+        <p id="control-ztrack-estado" class="hint" style="margin-top:10px"></p>
+        <button type="button" class="btn btn-sm btn-secondary" style="margin-top:8px" onclick="cargarHistorialZtrackControl()">Ver historial contexto ztrack</button>
+        <div id="control-ztrack-hist" class="hidden" style="margin-top:10px;max-height:160px;overflow:auto;font-size:0.8rem"></div>
+      </div>
 
       <div class="card-panel" style="margin-top:16px">
         <h3 style="margin:0 0 12px">📋 Seguimiento de proceso CA (informe)</h3>
