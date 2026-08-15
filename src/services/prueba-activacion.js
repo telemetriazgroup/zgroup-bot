@@ -1,13 +1,25 @@
 /**
  * Activación obligatoria: el usuario debe responder ≥3 veces a la prueba
  * antes de poder recibir alertas push. Cada paso se registra en conversacion_eventos.
+ *
+ * Números no activados: aviso diferido (90 s) para contactar a Luis Marcelo.
+ * Si ya hay mensajes pendientes en cola, no encolar otra réplica inmediata.
  */
 const { db } = require('../db')
 const { logger } = require('../logger')
-const { encolarTexto, jidDeTelefono } = require('./outbox')
-const { nombrePila, setContexto } = require('./conversacion')
+const {
+  encolarTexto,
+  encolarMensaje,
+  jidDeTelefono,
+  pendientePorJid,
+  tienePendienteTipo
+} = require('./outbox')
+const { nombrePila, setContexto, getContexto, pick } = require('./conversacion')
 
 const RESPUESTAS_REQUERIDAS = parseInt(process.env.PRUEBA_RESPUESTAS_REQUERIDAS || '3', 10)
+const AVISO_NO_ACTIVO_MS = parseInt(process.env.AVISO_NO_ACTIVO_MS || '90000', 10)
+const CONTACTO_ACTIVACION_NOMBRE = process.env.CONTACTO_ACTIVACION_NOMBRE || 'Luis Marcelo'
+const CONTACTO_ACTIVACION_TEL = process.env.CONTACTO_ACTIVACION_TEL || '908947464'
 
 function puedeRecibirAlertas(usuario) {
   return !!(usuario && usuario.activo && usuario.alertas_habilitadas)
@@ -15,6 +27,86 @@ function puedeRecibirAlertas(usuario) {
 
 function enPruebaPendiente(usuario) {
   return !!(usuario && usuario.prueba_iniciada_en && !usuario.alertas_habilitadas)
+}
+
+function mensajesContactoActivacion(usuario) {
+  const nombre = nombrePila(usuario?.nombre) || ''
+  const quien = CONTACTO_ACTIVACION_NOMBRE
+  const tel = CONTACTO_ACTIVACION_TEL
+  const pref = nombre ? `${nombre}, ` : ''
+  return [
+    `${pref}este chat aún *no está activado* para conversación con el monitor ZGroup.\n` +
+      `Para habilitarlo, contacta a *${quien}* al *${tel}*.`,
+    `${pref}todavía no puedo atenderte aquí: falta la activación.\n` +
+      `Escríbele a *${quien}* (*${tel}*) y te habilitan este número.`,
+    `Hola${nombre ? ` ${nombre}` : ''} — tu número no tiene conversación activa con el bot.\n` +
+      `Coordina con *${quien}* al *${tel}* para la activación.`,
+    `${pref}recibí tu mensaje, pero este WhatsApp no está habilitado aún.\n` +
+      `Por favor llama o escribe a *${quien}* (*${tel}*).`,
+    `Monitor ZGroup: chat pendiente de activación.\n` +
+      `${pref}contacta a *${quien}* al *${tel}* para continuar.`
+  ]
+}
+
+/**
+ * Programa aviso (+90 s) a números no activados.
+ * Solo si el usuario vuelve a escribir y no hay cooldown / pendiente.
+ */
+function avisarSiNoActivo(usuario, jid) {
+  if (!usuario || usuario.alertas_habilitadas) return { programado: false, motivo: 'ya_activo' }
+
+  if (tienePendienteTipo(jid, 'aviso_no_activo')) {
+    logger.info(`⏳ Aviso no-activo ya pendiente → ${usuario.nombre}; no se duplica`)
+    return { programado: false, motivo: 'ya_pendiente' }
+  }
+
+  const ctx = getContexto(jid) || {}
+  const ultimo = ctx.ultimo_aviso_no_activo_en || 0
+  const ahora = Date.now()
+  if (ultimo && ahora < ultimo) {
+    return { programado: false, motivo: 'ya_pendiente' }
+  }
+  if (ultimo && ahora - ultimo < AVISO_NO_ACTIVO_MS) {
+    logger.info(
+      `⏳ Aviso no-activo cooldown ${Math.ceil((AVISO_NO_ACTIVO_MS - (ahora - ultimo)) / 1000)}s → ${usuario.nombre}`
+    )
+    return { programado: false, motivo: 'cooldown' }
+  }
+
+  if (pendientePorJid(jid) > 0) {
+    logger.info(`⏳ Cola pendiente → ${usuario.nombre}; sin aviso extra (anti doble)`)
+    return { programado: false, motivo: 'cola_pendiente' }
+  }
+
+  const texto = pick(mensajesContactoActivacion(usuario))
+  const enviarDespues = ahora + AVISO_NO_ACTIVO_MS
+
+  encolarMensaje({
+    jid,
+    tipo: 'text',
+    text: texto,
+    enviarDespues,
+    prioridad: 4,
+    usuarioId: usuario.id,
+    meta: { tipo: 'aviso_no_activo' },
+    chatActivo: false,
+    esAlerta: false
+  })
+
+  setContexto(jid, {
+    ultimo_usuario_id: usuario.id,
+    ultimo_aviso_no_activo_en: enviarDespues
+  })
+
+  db.registrarEventoConversacion(usuario.id, 'aviso_no_activo_programado', {
+    detalle: `Aviso contacto ${CONTACTO_ACTIVACION_NOMBRE} en ${AVISO_NO_ACTIVO_MS / 1000}s`,
+    meta: { telefono_contacto: CONTACTO_ACTIVACION_TEL, delay_ms: AVISO_NO_ACTIVO_MS }
+  }).catch(() => {})
+
+  logger.info(
+    `📨 Aviso no-activo +${AVISO_NO_ACTIVO_MS / 1000}s → ${usuario.nombre} (*${CONTACTO_ACTIVACION_TEL}*)`
+  )
+  return { programado: true, delayMs: AVISO_NO_ACTIVO_MS }
 }
 
 async function iniciarPrueba(usuarioId, { origen = 'test-estado', meta = {} } = {}) {
@@ -81,10 +173,15 @@ function mensajesInicioPrueba(usuario, { totalDisp = 0, criticos = [], yaActivad
   return [linea1, linea2, linea3]
 }
 
-/**
- * Procesa una respuesta durante la prueba. Devuelve true si consumió el mensaje
- * (no hay que seguir con el handler normal de intenciones).
- */
+function encolarRespuestaPrueba(jid, texto, usuario) {
+  if (pendientePorJid(jid) > 0) {
+    logger.info(`⏳ Prueba: hay mensaje pendiente → ${usuario.nombre}; no se envía réplica doble`)
+    return false
+  }
+  encolarTexto(jid, texto, { prioridad: 1, usuarioId: usuario.id, meta: { tipo: 'prueba_paso' } })
+  return true
+}
+
 async function procesarRespuestaPrueba(usuario, jid, { textoRaw, intencion }) {
   if (!enPruebaPendiente(usuario)) return { handled: false }
 
@@ -113,45 +210,51 @@ async function procesarRespuestaPrueba(usuario, jid, { textoRaw, intencion }) {
       detalle: `Activación completa: ${req} respuestas. Alertas push habilitadas.`,
       meta: { respuestas: n }
     })
-    encolarTexto(
+    encolarRespuestaPrueba(
       jid,
       `Perfecto${nombre ? ` ${nombre}` : ''} — conversación de activación *completa* (${req}/${req}).\n` +
         `Desde ahora sí te enviaré alertas de reefers cuando algo crítico pase.\n` +
         `Puedes escribir *ESTADO*, *GRAFICA*, *ALERTAS* u *OK* cuando quieras.`,
-      { prioridad: 1 }
+      resultado
     )
     logger.info(`✅ Prueba completada → ${resultado.nombre} (alertas habilitadas)`)
     return { handled: true, completada: true, usuario: resultado }
   }
 
+  // Si aún hay mensajes de inicio de prueba en cola, no responder encima (anti doble)
+  if (pendientePorJid(jid) > 0) {
+    logger.info(`⏳ Prueba paso ${n}: cola pendiente → ${resultado.nombre}; sin réplica extra`)
+    return { handled: true, completada: false, usuario: resultado, paso: n, enriquecerEstado: false }
+  }
+
   if (n === 1) {
-    encolarTexto(
+    encolarRespuestaPrueba(
       jid,
       `Gracias${nombre ? ` ${nombre}` : ''} — te leí (*1/${req}*).\n` +
         `*Paso 2:* escribe *ESTADO* para ver un resumen de tus reefers.`,
-      { prioridad: 1 }
+      resultado
     )
   } else if (n === 2) {
     const conEstado = intencion === 'estado' || intencion === 'todos'
-    encolarTexto(
+    encolarRespuestaPrueba(
       jid,
       (conEstado ? `Bien — *2/${req}* anotado.\n` : `Bien — vamos *2/${req}*.\n`) +
         `*Paso 3:* responde *AYUDA* (o *OK*) para cerrar la activación.\n` +
         `Con esa tercera respuesta ya podré avisarte alarmas en el futuro.`,
-      { prioridad: 1 }
+      resultado
     )
     return {
       handled: true,
       completada: false,
       usuario: resultado,
       paso: n,
-      enriquecerEstado: conEstado
+      enriquecerEstado: false
     }
   } else {
-    encolarTexto(
+    encolarRespuestaPrueba(
       jid,
       `Recibido (*${n}/${req}*). Falta${n === req - 1 ? '' : 'n'} ${req - n} respuesta(s) para activar alertas.`,
-      { prioridad: 1 }
+      resultado
     )
   }
 
@@ -170,7 +273,6 @@ async function omitirAlertaPorPrueba(usuario, { imei, codigo } = {}) {
   return true
 }
 
-/** Admin: marcar prueba como aprobada sin las 3 respuestas por WhatsApp */
 async function aprobarPruebaManual(usuarioId, { motivo = 'admin' } = {}) {
   const usuario = await db.obtenerUsuarioPorId(usuarioId)
   if (!usuario) throw new Error('Usuario no encontrado')
@@ -203,6 +305,9 @@ async function revocarPruebaManual(usuarioId, { motivo = 'admin' } = {}) {
 
 module.exports = {
   RESPUESTAS_REQUERIDAS,
+  AVISO_NO_ACTIVO_MS,
+  CONTACTO_ACTIVACION_NOMBRE,
+  CONTACTO_ACTIVACION_TEL,
   puedeRecibirAlertas,
   enPruebaPendiente,
   iniciarPrueba,
@@ -210,5 +315,6 @@ module.exports = {
   procesarRespuestaPrueba,
   omitirAlertaPorPrueba,
   aprobarPruebaManual,
-  revocarPruebaManual
+  revocarPruebaManual,
+  avisarSiNoActivo
 }

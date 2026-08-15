@@ -30,24 +30,40 @@ async function enviarAlertaWhatsApp({ equipo_id, tipo_alerta, ubicacion, nivel, 
   const nombre = disp?.nombre || equipo_id
   const cod = codigo || 'alerta'
 
-  let encolados = 0
-  let bloqueados = 0
+  const elegibles = []
   for (const u of usuarios) {
     const jid = jidDeTelefono(u.telefono)
     if (estaMuteado(jid)) continue
     if (!puedeRecibirAlertas(u)) {
       await omitirAlertaPorPrueba(u, { imei: equipo_id, codigo: cod })
-      bloqueados++
       continue
     }
+    elegibles.push(u)
+  }
 
+  let encolados = 0
+  const bloqueados = usuarios.length - elegibles.length
+  const totalUsuarios = elegibles.length
+
+  for (let i = 0; i < elegibles.length; i++) {
+    const u = elegibles[i]
+    const jid = jidDeTelefono(u.telefono)
     const texto = mensajeAvisoAlerta(u, {
       nombreEquipo: nombre,
       imei: equipo_id,
+      codigo: cod,
       quePaso: tipo_alerta || `El reefer ${codigoATextoHumano(cod)}.`,
-      datoClave: ubicacion ? `Última IP/ubicación: ${ubicacion}` : null
+      datoClave: ubicacion ? `Última IP/ubicación: ${ubicacion}` : null,
+      indiceLote: i,
+      totalUsuarios
     })
-    encolarConversacion(jid, [texto], { prioridad: nivel === 'critico' ? 1 : 3 })
+    encolarConversacion(jid, [texto], {
+      modo: 'alerta',
+      esAlerta: true,
+      prioridad: nivel === 'critico' ? 3 : 4,
+      usuarioId: u.id,
+      imeiContexto: equipo_id
+    })
     setContexto(jid, {
       ultimo_usuario_id: u.id,
       ultimo_imei: equipo_id,
@@ -56,8 +72,8 @@ async function enviarAlertaWhatsApp({ equipo_id, tipo_alerta, ubicacion, nivel, 
       esperando: 'seguimiento'
     })
     await db.registrarEventoConversacion(u.id, 'alerta_encolada', {
-      detalle: `Alerta encolada: ${cod || tipo_alerta} · ${nombre}`,
-      meta: { imei: equipo_id, codigo: cod, nivel }
+      detalle: `Alerta encolada: ${cod || tipo_alerta} · ${nombre} · var#${i}`,
+      meta: { imei: equipo_id, codigo: cod, nivel, indiceLote: i, totalUsuarios }
     })
     encolados++
   }

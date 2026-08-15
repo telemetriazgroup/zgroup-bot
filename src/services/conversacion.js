@@ -73,20 +73,25 @@ function mensajeAvisoAlerta(usuario, {
   imei,
   quePaso,
   datoClave,
-  grupoNombre
+  grupoNombre,
+  codigo = 'alerta',
+  horas = null,
+  indiceLote = 0,
+  totalUsuarios = 1
 } = {}) {
-  const nombre = nombrePila(usuario.nombre) || ''
-  const saludo = pick(['Hola', 'Buenas', 'Aviso rápido'])
-  const equipo = nombreEquipo || imei
-  const grupo = grupoNombre ? ` (${grupoNombre})` : ''
-  const pref = nombre ? `${saludo} ${nombre}` : saludo
-
-  return (
-    `${pref} — aviso del reefer *${equipo}*${grupo}.\n` +
-    `${quePaso}` +
-    (datoClave ? `\n${datoClave}` : '') +
-    `\n\n¿Lo revisan en planta? Responde *OK*, *GRAFICA* o *ESTADO*.`
-  )
+  const { mensajeAlertaVariante } = require('./alerta-variantes')
+  const { texto } = mensajeAlertaVariante(usuario, {
+    nombreEquipo,
+    imei,
+    codigo,
+    quePaso,
+    datoClave,
+    grupoNombre,
+    horas,
+    indiceLote,
+    totalUsuarios
+  })
+  return texto
 }
 
 function mensajeAckOk(usuario, ctx) {

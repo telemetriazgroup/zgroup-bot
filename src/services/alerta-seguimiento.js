@@ -35,38 +35,48 @@ function leerUmbrales(config) {
 
 /**
  * Decide si corresponde notificar según horas continuas fuera de rango.
- * @returns {{ notificar: boolean, umbral: number, esPrimera: boolean, esReaviso: boolean } | null}
+ * Tras inactividad: salta al umbral MÁS ALTO ya cruzado (p.ej. 3 h), no encadena 2 h + 3 h.
  */
 function decidirNotificacionFuera(horasContinuas, seguimiento, umbrales) {
   const { minHoras, pasoHoras, maxHorasDia } = umbrales
+  const ultimo = parseFloat(seguimiento?.ultimo_umbral_horas || 0)
+  const esPrimera = !seguimiento?.ultima_notificacion_en
+  const esReaviso = !!seguimiento?.ultima_notificacion_en
+
   if (horasContinuas < minHoras) {
     return { notificar: false, umbral: 0, esPrimera: false, esReaviso: false, motivo: 'bajo_umbral' }
   }
-  if (horasContinuas > maxHorasDia) {
-    // Ya pasó el tope del día: solo notificar si nunca se avisó el tope
-    const ultimo = parseFloat(seguimiento?.ultimo_umbral_horas || 0)
-    if (ultimo >= maxHorasDia) {
-      return { notificar: false, umbral: maxHorasDia, esPrimera: false, esReaviso: false, motivo: 'tope_dia' }
+
+  // Mayor umbral ≤ horas actuales (y > último ya avisado)
+  let umbralAlcanzado = null
+  for (let u = minHoras; u <= maxHorasDia + 0.0001; u = Math.round((u + pasoHoras) * 1000) / 1000) {
+    const step = Math.min(u, maxHorasDia)
+    if (step > ultimo + 0.001 && horasContinuas + 0.001 >= step) {
+      umbralAlcanzado = Math.round(step * 100) / 100
     }
-    return { notificar: true, umbral: maxHorasDia, esPrimera: !seguimiento?.ultima_notificacion_en, esReaviso: !!seguimiento?.ultima_notificacion_en }
+    if (u >= maxHorasDia) break
   }
 
-  // Umbral a cruzar: min, luego min+paso, min+2*paso... floor to hours for messaging
-  const ultimo = parseFloat(seguimiento?.ultimo_umbral_horas || 0)
-  let siguiente = minHoras
-  while (siguiente <= ultimo + 0.001) {
-    siguiente += pasoHoras
+  if (horasContinuas + 0.001 >= maxHorasDia && ultimo + 0.001 < maxHorasDia) {
+    umbralAlcanzado = Math.round(maxHorasDia * 100) / 100
   }
-  if (siguiente > maxHorasDia) siguiente = maxHorasDia
 
-  if (horasContinuas + 0.001 >= siguiente && siguiente > ultimo) {
+  if (umbralAlcanzado != null) {
     return {
       notificar: true,
-      umbral: Math.round(siguiente * 100) / 100,
-      esPrimera: !seguimiento?.ultima_notificacion_en,
-      esReaviso: !!seguimiento?.ultima_notificacion_en
+      umbral: umbralAlcanzado,
+      esPrimera,
+      esReaviso,
+      motivo: umbralAlcanzado > minHoras && ultimo < minHoras
+        ? 'salto_umbrales'
+        : 'umbral_cruzado'
     }
   }
+
+  if (ultimo >= maxHorasDia) {
+    return { notificar: false, umbral: maxHorasDia, esPrimera: false, esReaviso: false, motivo: 'tope_dia' }
+  }
+
   return { notificar: false, umbral: ultimo, esPrimera: false, esReaviso: false, motivo: 'esperando_siguiente' }
 }
 
@@ -194,23 +204,42 @@ async function redactarAvisoFuera(usuario, {
   )
 }
 
-function redactarRecuperacionRango(usuario, { nombreEquipo, imei, horasFuera }) {
-  const nombre = nombrePila(usuario.nombre) || ''
-  const equipo = nombreEquipo || imei
-  const extra = horasFuera ? ` Había estado desviado ~${fmtHorasHumanas(horasFuera)}.` : ''
-  return (
-    `${pick(['Buenas noticias', 'Listo', 'Update'])}${nombre ? ` ${nombre}` : ''}: *${equipo}* ya volvió *al rango*.${extra}\n` +
-    `Si necesitas el cierre con gráfica, escribe *GRAFICA*; si no, *OK* basta.`
-  )
+function redactarRecuperacionRango(usuario, {
+  nombreEquipo,
+  imei,
+  horasFuera,
+  indiceLote = 0,
+  totalUsuarios = 1
+}) {
+  const { mensajeAlertaVariante } = require('./alerta-variantes')
+  const { texto } = mensajeAlertaVariante(usuario, {
+    nombreEquipo,
+    imei,
+    codigo: 'en_rango',
+    familia: 'recuperacion',
+    horas: horasFuera,
+    indiceLote,
+    totalUsuarios
+  })
+  return texto
 }
 
-function redactarOnline(usuario, { nombreEquipo, imei }) {
-  const nombre = nombrePila(usuario.nombre) || ''
-  const equipo = nombreEquipo || imei
-  return (
-    `${pick(['Hola', 'Aviso'])}${nombre ? ` ${nombre}` : ''}: *${equipo}* ya volvió a estar *en línea*.\n` +
-    `Escribe *ESTADO* si quieres ver temperaturas.`
-  )
+function redactarOnline(usuario, {
+  nombreEquipo,
+  imei,
+  indiceLote = 0,
+  totalUsuarios = 1
+}) {
+  const { mensajeAlertaVariante } = require('./alerta-variantes')
+  const { texto } = mensajeAlertaVariante(usuario, {
+    nombreEquipo,
+    imei,
+    codigo: 'online',
+    quePaso: 'ya volvió a estar *en línea*.',
+    indiceLote,
+    totalUsuarios
+  })
+  return texto
 }
 
 module.exports = {

@@ -24,7 +24,7 @@ const { analizarYGenerarGrafica, obtenerUltimosDatos } = require('./services/his
 const {
   enPruebaPendiente,
   procesarRespuestaPrueba,
-  RESPUESTAS_REQUERIDAS
+  avisarSiNoActivo
 } = require('./services/prueba-activacion')
 const { guardarEntrante } = require('./services/chat-historial')
 const { marcarAckSeguimiento } = require('./services/alerta-seguimiento')
@@ -361,15 +361,11 @@ async function manejarMensaje(sock, msg) {
       }
     }
 
-    if (!usuario.alertas_habilitadas && !usuario.prueba_iniciada_en) {
-      encolarTexto(
-        jid,
-        `Hola *${usuario.nombre}*. Aún no activamos este chat para alertas.\n` +
-          `ZGroup debe enviarte primero la *prueba de conversación*; luego respondes *${RESPUESTAS_REQUERIDAS} veces* y ya podré avisarte.`,
-        { prioridad: 2, usuarioId: usuario.id }
-      )
-      await db.registrarEventoConversacion(usuario.id, 'mensaje_sin_prueba', {
-        detalle: `Mensaje sin prueba iniciada: "${String(textoRaw).slice(0, 120)}"`,
+    // Número registrado pero sin conversación activada → aviso diferido (90 s) a Luis Marcelo
+    if (!usuario.alertas_habilitadas) {
+      avisarSiNoActivo(usuario, jid)
+      await db.registrarEventoConversacion(usuario.id, 'mensaje_sin_activacion', {
+        detalle: `Mensaje sin activación: "${String(textoRaw).slice(0, 120)}"`,
         meta: { intencion }
       })
       return

@@ -14,7 +14,6 @@ const {
   obtenerSeguimientoActivo,
   upsertSeguimientoNotificado,
   resolverSeguimiento,
-  redactarAvisoFuera,
   redactarRecuperacionRango,
   redactarOnline
 } = require('./alerta-seguimiento')
@@ -100,13 +99,17 @@ async function evaluarConexionSinDatos(disp, codigo, { notificar, config }) {
         const r = await notificarUsuarios(
           disp,
           codigo,
-          async (u) => {
+          async (u, { indiceLote = 0, totalUsuarios = 1 } = {}) => {
             const { mensajeAvisoAlerta, codigoATextoHumano } = require('./conversacion')
             return mensajeAvisoAlerta(u, {
               nombreEquipo: disp.nombre || disp.imei,
               imei: disp.imei,
+              codigo,
               quePaso: `lleva ~${horas.toFixed(1)} h sin datos (${codigoATextoHumano(codigo)})`,
-              datoClave: `Último dato: ${disp.ultimo_dato || 'N/A'} · aviso usuario desde ${usuario} h`
+              datoClave: `Último dato: ${disp.ultimo_dato || 'N/A'} · aviso usuario desde ${usuario} h`,
+              horas,
+              indiceLote,
+              totalUsuarios
             })
           },
           { nivel: codigo === 'offline' ? 'critico' : 'normal', meta: { horas, usuario } }
@@ -137,22 +140,32 @@ async function notificarUsuarios(disp, codigo, redactarFn, { nivel = 'normal', m
   const usuarios = await db.obtenerUsuariosDeEquipo(disp.imei)
   if (!usuarios.length) return { encolados: 0 }
 
-  let encolados = 0
-  let bloqueados = 0
+  const elegibles = []
   for (const u of usuarios) {
     const jid = jidDeTelefono(u.telefono)
     if (estaMuteado(jid)) continue
     if (!puedeRecibirAlertas(u)) {
       await omitirAlertaPorPrueba(u, { imei: disp.imei, codigo })
-      bloqueados++
       continue
     }
-    const texto = await redactarFn(u)
+    elegibles.push(u)
+  }
+
+  let encolados = 0
+  const bloqueados = usuarios.length - elegibles.length
+  const totalUsuarios = elegibles.length
+
+  for (let i = 0; i < elegibles.length; i++) {
+    const u = elegibles[i]
+    const jid = jidDeTelefono(u.telefono)
+    const texto = await redactarFn(u, { indiceLote: i, totalUsuarios })
     encolarConversacion(jid, [texto], {
-      prioridad: nivel === 'critico' ? 1 : 3,
+      modo: 'alerta',
+      esAlerta: true,
+      prioridad: nivel === 'critico' ? 3 : 4,
       usuarioId: u.id,
       imeiContexto: disp.imei,
-      meta: { codigo, ...meta }
+      meta: { codigo, variante_lote: i, total_usuarios: totalUsuarios, ...meta }
     })
     setContexto(jid, {
       ultimo_usuario_id: u.id,
@@ -163,12 +176,12 @@ async function notificarUsuarios(disp, codigo, redactarFn, { nivel = 'normal', m
       canal: 'privado'
     })
     await db.registrarEventoConversacion(u.id, 'alerta_encolada', {
-      detalle: `Alerta encolada: ${codigo} · ${disp.nombre || disp.imei}`,
-      meta: { imei: disp.imei, codigo, nivel, ...meta }
+      detalle: `Alerta encolada: ${codigo} · ${disp.nombre || disp.imei} · var#${i}`,
+      meta: { imei: disp.imei, codigo, nivel, indiceLote: i, totalUsuarios, ...meta }
     })
     encolados++
   }
-  return { encolados, bloqueados }
+  return { encolados, bloqueados, totalUsuarios }
 }
 
 async function dispararAlerta(disp, codigo, { detalle, temperatura, nivel = 'normal', analisisHistorico = null }) {
@@ -192,13 +205,16 @@ async function dispararAlerta(disp, codigo, { detalle, temperatura, nivel = 'nor
   const r = await notificarUsuarios(
     disp,
     codigo,
-    async (u) => {
+    async (u, { indiceLote = 0, totalUsuarios = 1 } = {}) => {
       const { mensajeAvisoAlerta, codigoATextoHumano } = require('./conversacion')
       return mensajeAvisoAlerta(u, {
         nombreEquipo: nombre,
         imei: disp.imei,
+        codigo,
         quePaso: `El reefer ${codigoATextoHumano(codigo)}.`,
-        datoClave
+        datoClave,
+        indiceLote,
+        totalUsuarios
       })
     },
     { nivel, meta: { detalle } }
@@ -249,6 +265,7 @@ async function procesarFueraDeRango(disp, {
 
   const usuarios = await db.obtenerUsuariosDeEquipo(disp.imei)
   let algunEnvio = false
+  const elegibles = []
 
   for (const u of usuarios) {
     if (!puedeRecibirAlertas(u)) {
@@ -263,27 +280,44 @@ async function procesarFueraDeRango(disp, {
 
     const decision = decidirNotificacionFuera(horasContinuas, seg, umbrales)
     if (!decision.notificar) continue
+    elegibles.push({ u, jid, decision })
+  }
 
-    const texto = await redactarAvisoFuera(u, {
+  const { mensajeAlertaVariante } = require('./alerta-variantes')
+  const totalUsuarios = elegibles.length
+
+  for (let i = 0; i < elegibles.length; i++) {
+    const { u, jid, decision } = elegibles[i]
+    const datoClave = analisisHistorico?.mensajeHoras
+      ? `${analisisHistorico.mensajeHoras}\n${detalleBase}`
+      : detalleBase
+
+    const { texto, variante } = mensajeAlertaVariante(u, {
       nombreEquipo: disp.nombre || disp.imei,
       imei: disp.imei,
+      codigo: 'fuera_de_rango',
+      familia: 'fuera',
+      quePaso: decision.esReaviso
+        ? 'Sigue fuera de rango.'
+        : 'Está fuera de rango.',
+      datoClave,
       horas: horasContinuas,
-      umbral: decision.umbral,
-      esPrimera: decision.esPrimera,
-      esReaviso: decision.esReaviso,
-      datoClave: analisisHistorico?.mensajeHoras
-        ? `${analisisHistorico.mensajeHoras}\n${detalleBase}`
-        : detalleBase,
-      sensorVal,
-      setRef,
-      delta
+      indiceLote: i,
+      totalUsuarios
     })
 
     encolarConversacion(jid, [texto], {
-      prioridad: 1,
+      modo: 'alerta',
+      esAlerta: true,
+      prioridad: 3,
       usuarioId: u.id,
       imeiContexto: disp.imei,
-      meta: { codigo: 'fuera_de_rango', umbral: decision.umbral, horas: horasContinuas }
+      meta: {
+        codigo: 'fuera_de_rango',
+        umbral: decision.umbral,
+        horas: horasContinuas,
+        variante
+      }
     })
     setContexto(jid, {
       ultimo_usuario_id: u.id,
@@ -294,11 +328,12 @@ async function procesarFueraDeRango(disp, {
     })
     await upsertSeguimientoNotificado(u.id, disp.imei, 'fuera_de_rango', decision.umbral, {
       horas: horasContinuas,
-      es_reaviso: decision.esReaviso
+      es_reaviso: decision.esReaviso,
+      variante
     })
     await db.registrarEventoConversacion(u.id, decision.esPrimera ? 'alerta_fuera' : 'reaviso_fuera', {
-      detalle: `Fuera de rango ~${horasContinuas.toFixed(1)}h (umbral ${decision.umbral}) · ${disp.nombre || disp.imei}`,
-      meta: { imei: disp.imei, umbral: decision.umbral, horas: horasContinuas }
+      detalle: `Fuera de rango ~${horasContinuas.toFixed(1)}h (umbral ${decision.umbral}) · ${disp.nombre || disp.imei} · var#${variante}`,
+      meta: { imei: disp.imei, umbral: decision.umbral, horas: horasContinuas, variante }
     })
     algunEnvio = true
   }
@@ -338,10 +373,11 @@ async function procesarRecuperacionRango(disp, { notificar, config, horasFuera }
   const r = await notificarUsuarios(
     disp,
     'en_rango',
-    async (u) => redactarRecuperacionRango(u, {
+    async (u, opts = {}) => redactarRecuperacionRango(u, {
       nombreEquipo: disp.nombre || disp.imei,
       imei: disp.imei,
-      horasFuera
+      horasFuera,
+      ...opts
     }),
     { nivel: 'normal', meta: { horasFuera } }
   )
@@ -410,9 +446,10 @@ async function evaluarDispositivo(dispositivoId, { notificar = true } = {}) {
       const r = await notificarUsuarios(
         disp,
         'online',
-        async (u) => redactarOnline(u, {
+        async (u, opts = {}) => redactarOnline(u, {
           nombreEquipo: disp.nombre || disp.imei,
-          imei: disp.imei
+          imei: disp.imei,
+          ...opts
         }),
         { nivel: 'normal' }
       )

@@ -328,7 +328,7 @@ async function envioYaProcesado(envioId) {
   return rows.length > 0
 }
 
-async function marcarEnvioProcesado(envio, { notificado = false, motivo = null } = {}) {
+async function marcarEnvioProcesado(envio, { notificado = false, motivo = null, ...extraMeta } = {}) {
   await pool.query(
     `INSERT INTO monitor_envios_procesados (envio_id, imei, alert_kind, umbral_horas, meta)
      VALUES ($1,$2,$3,$4,$5)
@@ -344,7 +344,8 @@ async function marcarEnvioProcesado(envio, { notificado = false, motivo = null }
         grupoNombre: envio.grupoNombre,
         destinatarioTipo: envio.destinatarioTipo,
         notificado,
-        motivo
+        motivo,
+        ...extraMeta
       })
     ]
   )
@@ -555,32 +556,69 @@ async function notificarWhatsApp(disp, {
   if (!usuarios.length) return { encolados: 0, bloqueados: 0 }
 
   const nombreEquipo = disp.nombre || meta?.nombrePlataforma || disp.imei
-  let encolados = 0
-  let bloqueados = 0
+  const { mensajeAlertaVariante } = require('./alerta-variantes')
 
+  const elegibles = []
   for (const u of usuarios) {
     const jid = jidDeTelefono(u.telefono)
     if (estaMuteado(jid)) continue
     if (!puedeRecibirAlertas(u)) {
       await omitirAlertaPorPrueba(u, { imei: disp.imei, codigo })
-      bloqueados++
       continue
     }
+    elegibles.push(u)
+  }
 
-    const texto = redactarDesdeMonitor(u, {
+  let encolados = 0
+  const bloqueados = usuarios.length - elegibles.length
+  const totalUsuarios = elegibles.length
+  const label = KIND_LABEL[kind] || kind
+  const t = telemetria || {}
+  const datos = []
+  if (t.returnAir != null || t.return_air != null) {
+    datos.push(`Retorno *${t.returnAir ?? t.return_air} °C*`)
+  }
+  if (t.setPoint != null || t.set_point != null) {
+    datos.push(`set *${t.setPoint ?? t.set_point} °C*`)
+  }
+  if (t.estadoConexion || t.estado_conexion) {
+    datos.push(`conexión ${(t.estadoConexion || t.estado_conexion)}`)
+  }
+  const datoClave = [
+    datos.length ? datos.join(' · ') : null,
+    criterio ? String(criterio).slice(0, 220) : null,
+    umbral != null ? `umbral ${fmtHoras(umbral)}` : null
+  ].filter(Boolean).join('\n')
+
+  const familia =
+    codigo === 'fuera_linea' || String(kind || '').toLowerCase().includes('linea')
+      ? 'sin_dato'
+      : (codigo === 'fuera_de_rango' || String(kind || '').toLowerCase().includes('rango')
+        ? 'fuera'
+        : null)
+
+  for (let i = 0; i < elegibles.length; i++) {
+    const u = elegibles[i]
+    const jid = jidDeTelefono(u.telefono)
+    const { texto, variante } = mensajeAlertaVariante(u, {
       nombreEquipo,
-      kind,
+      imei: disp.imei,
+      codigo: codigo || kind,
+      familia,
+      quePaso: `está *${label}*`,
+      datoClave: datoClave || null,
       horas,
-      umbral,
-      criterio,
-      telemetria
+      indiceLote: i,
+      totalUsuarios
     })
 
     encolarConversacion(jid, [texto], {
-      prioridad: 1,
+      modo: 'alerta',
+      esAlerta: true,
+      prioridad: 3,
       usuarioId: u.id,
       imeiContexto: disp.imei,
-      meta: { origen: 'monitor_externo', codigo, kind, umbral, ...meta }
+      meta: { origen: 'monitor_externo', codigo, kind, umbral, variante, ...meta }
     })
     setContexto(jid, {
       ultimo_usuario_id: u.id,
@@ -592,13 +630,15 @@ async function notificarWhatsApp(disp, {
     await upsertSeguimientoNotificado(u.id, disp.imei, codigo, umbral ?? horas ?? 0, {
       origen: 'monitor_externo',
       kind,
-      horas
+      horas,
+      variante
     })
     await db.registrarEventoConversacion(u.id, 'monitor_externo_alerta', {
       detalle: `[ztrack] ${kind} · ${nombreEquipo}` +
         (umbral != null ? ` · umbral ${fmtHoras(umbral)}` : '') +
-        (horas != null ? ` · ${fmtHoras(horas)}` : ''),
-      meta: { imei: disp.imei, codigo, kind, umbral, horas, envioId: meta?.envioId }
+        (horas != null ? ` · ${fmtHoras(horas)}` : '') +
+        ` · var#${variante}`,
+      meta: { imei: disp.imei, codigo, kind, umbral, horas, envioId: meta?.envioId, variante }
     })
     encolados++
   }
@@ -614,20 +654,24 @@ async function notificarWhatsApp(disp, {
     })
   }
 
-  return { encolados, bloqueados }
+  return { encolados, bloqueados, totalUsuarios }
 }
 
 /**
- * Solo ultimasAlertasEnviadas. Un umbral = un WA por día.
+ * Solo ultimasAlertasEnviadas.
+ * Si tras inactividad llegan varios umbrales del mismo IMEI/kind (2h, 3h…),
+ * solo se notifica el MÁS ALTO; los inferiores se marcan procesados/absorbidos.
  */
 async function procesarUltimasAlertas(ultimas, mapLocal, { bootstrap = false } = {}) {
   const resultados = []
-  const yaEnCiclo = new Set() // imei|kind|umbral dentro de este poll
   const dia = diaLima()
 
   const ordenados = [...(ultimas || [])].sort(
     (a, b) => new Date(a.sentAt || 0) - new Date(b.sentAt || 0)
   )
+
+  /** @type {Map<string, Array<object>>} */
+  const grupos = new Map()
 
   for (const envio of ordenados) {
     if (!envio?.id || !envio?.imei) continue
@@ -635,11 +679,9 @@ async function procesarUltimasAlertas(ultimas, mapLocal, { bootstrap = false } =
 
     const kind = envio.alertKind || mapCodigoInterno(envio.alertKind)
     const umbralKey = umbralKeyDeEnvio(envio)
-    const claveUmbral = `${envio.imei}|${kind}|${umbralKey}|${dia}`
-
+    const umbralNum = Number(umbralKey) || 0
     const disp = mapLocal.get(String(envio.imei))
 
-    // Bootstrap / sin dispositivo / sin prioridad → consumir envío sin WA
     if (bootstrap || !disp) {
       await marcarEnvioProcesado(envio, {
         notificado: false,
@@ -656,19 +698,62 @@ async function procesarUltimasAlertas(ultimas, mapLocal, { bootstrap = false } =
       continue
     }
 
-    if (yaEnCiclo.has(claveUmbral) || (await umbralYaNotificado(envio.imei, kind, umbralKey, dia))) {
+    if (await umbralYaNotificado(envio.imei, kind, umbralKey, dia)) {
       await marcarEnvioProcesado(envio, { notificado: false, motivo: 'umbral_ya_notificado' })
-      yaEnCiclo.add(claveUmbral)
       continue
     }
 
-    const codigo = mapCodigoInterno(kind)
-    const horas = horasDeEnvio(envio)
-    const umbralNum = Number(umbralKey) || 0
+    const gkey = `${envio.imei}|${kind}|${dia}`
+    if (!grupos.has(gkey)) grupos.set(gkey, [])
+    grupos.get(gkey).push({
+      envio,
+      kind,
+      umbralKey,
+      umbralNum,
+      disp,
+      codigo: mapCodigoInterno(kind),
+      horas: horasDeEnvio(envio)
+    })
+  }
 
-    // Sin datos / fuera de línea: interno desde wait_interno; WA cliente desde wait_usuario (def. 4 h)
-    const esSinDatos = codigo === 'fuera_linea'
-    if (esSinDatos) {
+  for (const [, items] of grupos) {
+    // Mayor umbral primero; empate → más reciente
+    items.sort((a, b) =>
+      b.umbralNum - a.umbralNum ||
+      new Date(b.envio.sentAt || 0) - new Date(a.envio.sentAt || 0)
+    )
+    const winner = items[0]
+    const absorbidos = items.slice(1)
+
+    for (const a of absorbidos) {
+      await registrarUmbralNotificado(a.envio.imei, a.kind, a.umbralKey, a.envio.id, dia)
+      await marcarEnvioProcesado(a.envio, {
+        notificado: false,
+        motivo: 'absorbido_umbral_mayor',
+        umbral_enviado: winner.umbralKey,
+        envio_ganador: winner.envio.id
+      })
+      resultados.push({
+        envio_id: a.envio.id,
+        imei: a.envio.imei,
+        kind: a.kind,
+        umbral: a.umbralKey,
+        encolados: 0,
+        absorbido_por: winner.umbralKey
+      })
+    }
+
+    if (absorbidos.length) {
+      logger.info(
+        `🗜️ Monitor ztrack ${winner.envio.imei} ${winner.kind}: ` +
+          `${absorbidos.length} umbral(es) absorbido(s) → solo envía ${winner.umbralKey}h`
+      )
+    }
+
+    const { envio, kind, umbralKey, umbralNum, disp, codigo, horas } = winner
+
+    // Sin datos: interno < wait_usuario; WA desde wait_usuario
+    if (codigo === 'fuera_linea') {
       const cfgApi = await db.obtenerConfigApi().catch(() => null)
       const waitInterno = Math.max(0.5, parseFloat(cfgApi?.wait_interno_horas ?? 2) || 2)
       const waitUsuario = Math.max(waitInterno, parseFloat(cfgApi?.wait_usuario_horas ?? 4) || 4)
@@ -690,7 +775,8 @@ async function procesarUltimasAlertas(ultimas, mapLocal, { bootstrap = false } =
             umbral: umbralNum,
             waitInterno,
             waitUsuario,
-            envioId: envio.id
+            envioId: envio.id,
+            absorbidos: absorbidos.map(x => x.umbralKey)
           }
         }).catch(() => {})
         await registrarUmbralNotificado(envio.imei, kind, umbralKey, envio.id, dia)
@@ -698,7 +784,6 @@ async function procesarUltimasAlertas(ultimas, mapLocal, { bootstrap = false } =
           notificado: false,
           motivo: 'interno_sin_wa_umbral_bajo'
         })
-        yaEnCiclo.add(claveUmbral)
         resultados.push({
           envio_id: envio.id,
           imei: envio.imei,
@@ -735,17 +820,17 @@ async function procesarUltimasAlertas(ultimas, mapLocal, { bootstrap = false } =
         nombrePlataforma: envio.nombrePlataforma || envio.descripcionEquipo,
         grupoNombre: envio.grupoNombre,
         envioId: envio.id,
-        umbralKey
+        umbralKey,
+        umbrales_absorbidos: absorbidos.map(x => x.umbralKey)
       }
     })
 
-    // Registrar umbral aunque 0 encolados (prueba pendiente): evita reintentos spam del mismo umbral
     await registrarUmbralNotificado(envio.imei, kind, umbralKey, envio.id, dia)
     await marcarEnvioProcesado(envio, {
       notificado: r.encolados > 0,
-      motivo: r.encolados > 0 ? 'wa_encolado' : (r.bloqueados ? 'bloqueado_prueba' : 'sin_usuarios')
+      motivo: r.encolados > 0 ? 'wa_encolado' : (r.bloqueados ? 'bloqueado_prueba' : 'sin_usuarios'),
+      umbrales_absorbidos: absorbidos.map(x => x.umbralKey)
     })
-    yaEnCiclo.add(claveUmbral)
 
     resultados.push({
       envio_id: envio.id,
@@ -755,9 +840,11 @@ async function procesarUltimasAlertas(ultimas, mapLocal, { bootstrap = false } =
       ...r
     })
     logger.info(
-      `📨 Monitor ztrack ${envio.imei} ${kind} umbral=${umbralKey} → WA:${r.encolados} (envio ${envio.id})`
+      `📨 Monitor ztrack ${envio.imei} ${kind} umbral=${umbralKey} → WA:${r.encolados} (envio ${envio.id})` +
+        (absorbidos.length ? ` · absorbidos:[${absorbidos.map(x => x.umbralKey).join(',')}]` : '')
     )
   }
+
   return resultados
 }
 
